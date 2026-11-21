@@ -70,6 +70,7 @@ pub enum Phase {
 
 impl Phase {
     /// Whether the pill should be on screen at all.
+    #[cfg(test)]
     pub fn visible(self) -> bool {
         self != Phase::Idle
     }

@@ -71,6 +71,15 @@ pub enum AudioError {
     Stopped,
 }
 
+/// Callback invoked periodically during capture with a normalized `0.0..=1.0`
+/// microphone RMS level for live UI feedback.
+pub type LevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
+
+/// How often the capture loop samples recent audio for the live level meter.
+const LEVEL_INTERVAL: Duration = Duration::from_millis(45);
+/// Number of recent samples used to compute the instantaneous RMS level.
+const LEVEL_WINDOW: usize = 1024;
+
 /// A running microphone capture.
 ///
 /// The device and its stream live on their own thread, because a cpal stream is
@@ -82,16 +91,13 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// Opens the default input device and starts recording.
-    ///
-    /// Returns only once the stream is actually running, so a caller that gets
-    /// `Ok` knows sound is being captured, and a caller that gets `Err` has a
-    /// reason to show.
-    pub fn start() -> Result<Self, AudioError> {
+    /// Opens the default input device and starts recording, reporting live
+    /// `0.0..=1.0` mic levels when `on_level` is provided.
+    pub fn start_with_levels(on_level: Option<LevelCallback>) -> Result<Self, AudioError> {
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), AudioError>>();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
-        let join = thread::spawn(move || capture_until_stopped(&stop_rx, &ready_tx));
+        let join = thread::spawn(move || capture_until_stopped(&stop_rx, &ready_tx, on_level));
 
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(Self {
@@ -120,6 +126,7 @@ impl Capture {
 fn capture_until_stopped(
     stop: &Receiver<()>,
     ready: &Sender<Result<(), AudioError>>,
+    on_level: Option<LevelCallback>,
 ) -> Result<Audio, AudioError> {
     let host = cpal::default_host();
     let device = host
@@ -148,9 +155,18 @@ fn capture_until_stopped(
         return Err(AudioError::Stopped);
     }
 
-    // Block until the caller stops us. A disconnected channel means the handle
-    // was dropped, which is also a stop.
-    let _ = stop.recv();
+    // Poll for stop so we can emit live mic levels without blocking the audio callback.
+    loop {
+        match stop.recv_timeout(LEVEL_INTERVAL) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(ref emit) = on_level {
+                    let level = recent_level(&samples);
+                    emit(level);
+                }
+            }
+        }
+    }
     drop(stream);
 
     if let Some(message) = failure.lock().ok().and_then(|slot| slot.clone()) {
@@ -170,6 +186,21 @@ fn capture_until_stopped(
         samples,
         sample_rate,
     })
+}
+
+fn recent_level(samples: &Arc<Mutex<Vec<f32>>>) -> f32 {
+    let Ok(guard) = samples.try_lock() else {
+        return 0.0;
+    };
+    if guard.is_empty() {
+        return 0.0;
+    }
+    let start = guard.len().saturating_sub(LEVEL_WINDOW);
+    let slice = &guard[start..];
+    let sum_sq: f32 = slice.iter().map(|s| s * s).sum();
+    let rms = (sum_sq / slice.len() as f32).sqrt();
+    // Boost quiet speech into a responsive 0..1 curve.
+    (rms * 8.0).clamp(0.0, 1.0).sqrt()
 }
 
 fn build_stream(

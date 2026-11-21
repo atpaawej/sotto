@@ -13,7 +13,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    audio::{self, AudioError, Capture},
+    audio::{self, AudioError, Capture, LevelCallback},
     config::{Config, ProviderId},
     transcribe::{Groq, Request, TranscribeError, Transcriber},
 };
@@ -86,7 +86,16 @@ impl Dictation {
     ///
     /// Refusing before recording, rather than after, is the difference between
     /// "add a key" and "you just spoke for ten seconds and lost it".
+    #[cfg(test)]
     pub fn start(&self, config: &Config) -> Result<(), DictationError> {
+        self.start_with_levels(config, None)
+    }
+
+    pub fn start_with_levels(
+        &self,
+        config: &Config,
+        on_level: Option<LevelCallback>,
+    ) -> Result<(), DictationError> {
         match config.active_provider {
             ProviderId::Groq => {
                 if config
@@ -109,7 +118,7 @@ impl Dictation {
         if slot.is_some() {
             return Err(DictationError::AlreadyRecording);
         }
-        *slot = Some(Capture::start()?);
+        *slot = Some(Capture::start_with_levels(on_level)?);
         Ok(())
     }
 

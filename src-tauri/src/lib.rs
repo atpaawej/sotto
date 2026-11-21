@@ -67,12 +67,17 @@ struct AppInfo {
 struct Microphone {
     dictation: Dictation,
     config: Config,
+    app: AppHandle,
 }
 
 impl CapturePort for Microphone {
     fn start(&mut self) -> Result<(), String> {
+        let app = self.app.clone();
+        let on_level = Arc::new(move |level: f32| {
+            let _ = app.emit("dictation://level", level);
+        });
         self.dictation
-            .start(&self.config)
+            .start_with_levels(&self.config, Some(on_level))
             .map_err(|error| describe(&error))
     }
 
@@ -152,6 +157,11 @@ fn send(state: &State<'_, AppState>, input: Input) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_main_window(app: AppHandle) {
+    show_main(&app);
+}
+
+#[tauri::command]
 fn app_info() -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
@@ -199,6 +209,7 @@ pub fn run() {
             dictation_state,
             access_status,
             retry_keyboard_access,
+            open_main_window,
         ])
         .setup(|app| {
             let path = ConfigStore::default_path()
@@ -314,6 +325,7 @@ fn start_session(
             capture: Box::new(Microphone {
                 dictation: Dictation::new(),
                 config,
+                app: app.clone(),
             }),
             injector: Box::new(bridge.injector),
             surface: Box::new(pill::PillSurface::new(app.clone())),

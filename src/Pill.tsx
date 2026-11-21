@@ -1,22 +1,34 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import {
   cancelDictation,
   DICTATION_EVENT,
+  keyLabel,
+  openMainWindow,
+  readAccess,
   readDictationState,
+  toggleDictation,
   type DictationState,
 } from "./lib/api";
 
+const BAR_WEIGHTS = [0.42, 0.7, 0.92, 1.0, 0.92, 0.7, 0.42];
+const SPRING = { type: "spring", duration: 0.34, bounce: 0.14 } as const;
+
 /**
- * The pill: what is happening, in one line at the bottom of the screen.
+ * The pill: a persistent, non-focusing floating bar at the bottom centre.
  *
- * It is a second webview (`index.html?window=pill`) in a window Rust positions.
- * While listening it ignores the mouse entirely, so a click where it sits goes
- * to the app underneath and never steals focus from where the text will land.
+ * Expands from all sides with spring physics across states: compact at rest,
+ * shortcut reminder on hover, waveform-only while listening, and a dismissible
+ * card when transcription or injection fails.
  */
 export default function Pill() {
   const [dictation, setDictation] = useState<DictationState | null>(null);
+  const [shortcut, setShortcut] = useState<string>("Right Ctrl");
+  const [hovered, setHovered] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [bars, setBars] = useState<number[]>(() => BAR_WEIGHTS.map(() => 0.16));
   const since = useRef<number | null>(null);
 
   useEffect(() => {
@@ -26,18 +38,40 @@ export default function Pill() {
       (state) => {
         if (!cancelled) setDictation(state);
       },
-      () => {
-        // The pill still works from events; a failed initial read is not fatal.
-      },
+      () => {},
     );
 
-    const unlisten = listen<DictationState>(DICTATION_EVENT, (event) => {
+    readAccess().then(
+      (access) => {
+        if (!cancelled && access.hotkey.trigger) {
+          setShortcut(keyLabel(access.hotkey.trigger));
+        }
+      },
+      () => {},
+    );
+
+    const unlistenState = listen<DictationState>(DICTATION_EVENT, (event) => {
       setDictation(event.payload);
+      if (event.payload.phase !== "failed" && event.payload.phase !== "hint") {
+        setDismissed(false);
+      }
+    });
+
+    const unlistenLevel = listen<number>("dictation://level", (event) => {
+      const level = Math.max(0.08, Math.min(1, event.payload));
+      setBars((prev) =>
+        BAR_WEIGHTS.map((weight, index) => {
+          const jitter = 0.85 + ((index * 37) % 30) / 100;
+          const target = Math.min(1, level * weight * jitter);
+          return prev[index] * 0.35 + target * 0.65;
+        }),
+      );
     });
 
     return () => {
       cancelled = true;
-      void unlisten.then((stop) => stop());
+      void unlistenState.then((stop) => stop());
+      void unlistenLevel.then((stop) => stop());
     };
   }, []);
 
@@ -45,6 +79,7 @@ export default function Pill() {
     if (dictation?.phase !== "listening") {
       since.current = null;
       setElapsed(0);
+      setBars(BAR_WEIGHTS.map(() => 0.16));
       return;
     }
 
@@ -57,71 +92,193 @@ export default function Pill() {
     return () => window.clearInterval(id);
   }, [dictation?.phase]);
 
-  if (!dictation || dictation.phase === "idle") {
-    return (
-      <div className="pill pill-idle" aria-label="Sotto ready">
-        <span className="pill-idle-dot" aria-hidden="true" />
-        <span className="pill-idle-bar" aria-hidden="true" />
-      </div>
-    );
-  }
+  const rawPhase = dictation?.phase ?? "idle";
+  const isError = (rawPhase === "failed" || rawPhase === "hint") && !dismissed;
+  const phase = dismissed && (rawPhase === "failed" || rawPhase === "hint") ? "idle" : rawPhase;
 
-  const { phase, locked, tapMode, message } = dictation;
+  const isIdle = phase === "idle";
+  const isListening = phase === "listening";
+  const isWorking = phase === "working";
+  const isDone = phase === "done";
+
+  function handlePillClick() {
+    if (isIdle || isListening) {
+      void toggleDictation();
+    }
+  }
 
   return (
-    <div className={`pill pill-${phase}`} role="status" aria-live="polite">
-      {phase === "listening" ? (
-        <span className="pill-dot" aria-hidden="true" />
-      ) : phase === "working" ? (
-        <span className="pill-spinner" aria-hidden="true" />
-      ) : phase === "done" ? (
-        <span className="pill-check" aria-hidden="true">
-          ✓
-        </span>
-      ) : (
-        <span className="pill-mark" aria-hidden="true">
-          ·
-        </span>
-      )}
+    <MotionConfig reducedMotion="user">
+      <motion.div
+        layout
+        transition={SPRING}
+        className={[
+          "pill",
+          `pill-${phase}`,
+          isIdle && hovered ? "pill-hover" : "",
+          isIdle || isListening ? "pill-clickable" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        role="status"
+        aria-live="polite"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onClick={handlePillClick}
+        whileTap={isIdle || isListening ? { scale: 0.97 } : undefined}
+      >
+        <AnimatePresence mode="popLayout" initial={false}>
+          {isIdle && !hovered && (
+            <motion.div
+              key="idle-rest"
+              className="pill-row"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+            >
+              <span className="pill-idle-dot" aria-hidden="true" />
+              <span className="pill-idle-bar" aria-hidden="true" />
+            </motion.div>
+          )}
 
-      <span className="pill-label">{label(phase, locked, tapMode, message)}</span>
+          {isIdle && hovered && (
+            <motion.div
+              key="idle-hover"
+              className="pill-row"
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+            >
+              <span className="pill-idle-dot pill-idle-dot-active" aria-hidden="true" />
+              <span className="pill-hint-text">
+                Click or hold <kbd className="pill-kbd">{shortcut}</kbd> to start dictating
+              </span>
+            </motion.div>
+          )}
 
-      {phase === "listening" && (
-        <span className="pill-time" aria-hidden="true">
-          {formatElapsed(elapsed)}
-        </span>
-      )}
+          {isListening && (
+            <motion.div
+              key="listening"
+              className="pill-row"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.15, ease: [0.23, 1, 0.32, 1] }}
+            >
+              <span className="pill-wave" aria-label="Listening">
+                {bars.map((value, index) => (
+                  <span
+                    key={index}
+                    className="pill-bar"
+                    style={{ transform: `scaleY(${0.22 + value * 0.78})` }}
+                  />
+                ))}
+              </span>
+              <span className="pill-time" aria-hidden="true">
+                {formatElapsed(elapsed)}
+              </span>
+            </motion.div>
+          )}
 
-      {phase === "working" && (
-        <button
-          className="pill-cancel"
-          type="button"
-          onClick={() => void cancelDictation()}
-        >
-          Cancel
-        </button>
-      )}
-    </div>
+          {isWorking && (
+            <motion.div
+              key="working"
+              className="pill-row"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+            >
+              <span className="pill-spinner" aria-hidden="true" />
+              <span className="pill-label">Transcribing…</span>
+              <button
+                className="pill-cancel"
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void cancelDictation();
+                }}
+              >
+                Cancel
+              </button>
+            </motion.div>
+          )}
+
+          {isDone && (
+            <motion.div
+              key="done"
+              className="pill-row"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+            >
+              <span className="pill-check" aria-hidden="true">
+                ✓
+              </span>
+              <span className="pill-label">Inserted</span>
+            </motion.div>
+          )}
+
+          {isError && (
+            <motion.div
+              key="error"
+              className="pill-error-card"
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="pill-error-head">
+                <span className="pill-error-title">
+                  <span className="pill-mark" aria-hidden="true">
+                    ·
+                  </span>
+                  {rawPhase === "hint" ? "Heads up" : "Dictation failed"}
+                </span>
+                <button
+                  className="pill-dismiss"
+                  type="button"
+                  aria-label="Dismiss"
+                  onClick={() => setDismissed(true)}
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="pill-error-message">
+                {dictation?.message ?? "Something went wrong."}
+              </p>
+              <div className="pill-error-actions">
+                <button
+                  className="pill-action"
+                  type="button"
+                  onClick={() => {
+                    setDismissed(true);
+                    void toggleDictation();
+                  }}
+                >
+                  Try again
+                </button>
+                <button
+                  className="pill-action pill-action-secondary"
+                  type="button"
+                  onClick={() => {
+                    setDismissed(true);
+                    void openMainWindow();
+                  }}
+                >
+                  Open settings
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    </MotionConfig>
   );
-}
-
-function label(
-  phase: DictationState["phase"],
-  locked: boolean,
-  tapMode: boolean,
-  message: string | null,
-): string {
-  switch (phase) {
-    case "listening":
-      if (locked) return "Listening — tap to finish";
-      return tapMode ? "Listening — tap to finish" : "Listening";
-    case "working":
-      return "Transcribing";
-    case "done":
-      return "Inserted";
-    default:
-      return message ?? "Something went wrong";
-  }
 }
 
 function formatElapsed(milliseconds: number): string {

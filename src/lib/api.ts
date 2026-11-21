@@ -117,6 +117,11 @@ export function retryKeyboardAccess(): Promise<void> {
   return invoke<void>("retry_keyboard_access");
 }
 
+/** Brings the main Settings window to the front. */
+export function openMainWindow(): Promise<void> {
+  return invoke<void>("open_main_window");
+}
+
 const KEY_NAMES: Record<string, string> = {
   ControlRight: "Right Ctrl",
   ControlLeft: "Left Ctrl",

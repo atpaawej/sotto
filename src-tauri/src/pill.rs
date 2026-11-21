@@ -13,14 +13,15 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, Emitter, PhysicalPosition, WebviewWindow};
 
 use crate::session::{Phase, SurfacePort, View};
 
-const PILL_WIDTH: i32 = 360;
-const PILL_HEIGHT: f64 = 64.0;
-/// Distance from the bottom of the screen, leaving room for a dock.
-const BOTTOM_MARGIN: i32 = 132;
+const PILL_WIDTH: i32 = 380;
+const PILL_HEIGHT: f64 = 128.0;
+/// Distance from the bottom of the screen, leaving room for a dock and
+/// vertical expansion when the pill shows an error card.
+const BOTTOM_MARGIN: i32 = 156;
 const MARGIN: i32 = 64;
 
 /// Creates the persistent pill window at bottom centre, click-through and
@@ -48,7 +49,9 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
     place(&window);
     let _ = window.set_always_on_top(true);
     let _ = window.set_visible_on_all_workspaces(true);
-    let _ = window.set_ignore_cursor_events(true);
+    // Keep cursor events enabled so hover tooltips, click-to-dictate, Cancel,
+    // and error dismiss work; `.focusable(false)` prevents stealing focus.
+    let _ = window.set_ignore_cursor_events(false);
     Ok(())
 }
 
@@ -69,17 +72,8 @@ impl PillSurface {
 }
 
 impl SurfacePort for PillSurface {
-    fn show(&mut self, view: &View, hide_after: Option<Duration>) {
+    fn show(&mut self, _view: &View, hide_after: Option<Duration>) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let interactive = view.phase == Phase::Working;
-        let app = self.app.clone();
-
-        // Mutating GTK window properties must happen on the main thread.
-        let _ = self.app.run_on_main_thread(move || {
-            if let Some(window) = app.get_webview_window("pill") {
-                let _ = window.set_ignore_cursor_events(!interactive);
-            }
-        });
 
         if let Some(after) = hide_after {
             let app = self.app.clone();
@@ -97,12 +91,6 @@ impl SurfacePort for PillSurface {
                     attempt: None,
                 };
                 let _ = app.emit("dictation://state", &idle);
-                let main_app = app.clone();
-                let _ = app.run_on_main_thread(move || {
-                    if let Some(window) = main_app.get_webview_window("pill") {
-                        let _ = window.set_ignore_cursor_events(true);
-                    }
-                });
             });
         }
     }
