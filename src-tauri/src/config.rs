@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE_NAME: &str = "config.json";
 
-const CURRENT_VERSION: u32 = 1;
+/// Bumped when a file written by an older build needs a one-time rewrite.
+/// Version 2 made Groq the default provider, because it is the one wired up.
+const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -46,8 +48,8 @@ impl Default for Config {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderId {
-    #[default]
     ElevenLabs,
+    #[default]
     Groq,
 }
 
@@ -174,7 +176,7 @@ impl ConfigStore {
     /// and left alone: the user's keys are worth more than a clean start.
     pub fn load_or_init(&self) -> Result<Config, ConfigError> {
         match self.load() {
-            Ok(config) => Ok(config),
+            Ok(config) => self.migrate(config),
             Err(ConfigError::Missing { .. }) => {
                 let config = Config::default();
                 self.save(&config)?;
@@ -182,6 +184,31 @@ impl ConfigStore {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Brings an older file up to the current shape, once.
+    ///
+    /// Only fields whose meaning changed are touched. A file that already has a
+    /// version at least this new is returned exactly as the user left it.
+    fn migrate(&self, mut config: Config) -> Result<Config, ConfigError> {
+        if config.version >= CURRENT_VERSION {
+            return Ok(config);
+        }
+
+        let had_no_choice = config.active_provider == ProviderId::ElevenLabs
+            && config.providers.elevenlabs_key.is_none();
+        if had_no_choice {
+            config.active_provider = ProviderId::Groq;
+        }
+        config.version = CURRENT_VERSION;
+
+        eprintln!(
+            "config: migrated {} to version {CURRENT_VERSION} (provider {})",
+            self.path.display(),
+            if had_no_choice { "now groq" } else { "kept" }
+        );
+        self.save(&config)?;
+        Ok(config)
     }
 
     /// Writes the config atomically: a private temp file in the same directory,
@@ -300,6 +327,59 @@ mod tests {
         assert_eq!(config, Config::default());
         assert!(store.path().exists(), "the defaults are written, not just returned");
         assert_eq!(store.load().expect("reload"), config);
+    }
+
+    #[test]
+    fn a_version_one_file_without_an_elevenlabs_key_moves_to_groq() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("mkdir");
+        fs::write(
+            store.path(),
+            r#"{"version":1,"active_provider":"eleven_labs"}"#,
+        )
+        .expect("write v1 config");
+
+        let config = store.load_or_init().expect("migrate");
+
+        assert_eq!(config.active_provider, ProviderId::Groq);
+        assert_eq!(config.version, CURRENT_VERSION);
+        assert_eq!(
+            store.load().expect("reload").active_provider,
+            ProviderId::Groq,
+            "the migration is written, not just returned"
+        );
+    }
+
+    #[test]
+    fn a_version_one_file_with_an_elevenlabs_key_keeps_the_users_choice() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("mkdir");
+        fs::write(
+            store.path(),
+            r#"{"version":1,"active_provider":"eleven_labs","providers":{"elevenlabs_key":"sk-test"}}"#,
+        )
+        .expect("write v1 config");
+
+        let config = store.load_or_init().expect("migrate");
+
+        assert_eq!(config.active_provider, ProviderId::ElevenLabs);
+        assert_eq!(config.providers.elevenlabs_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn a_current_file_is_left_alone() {
+        let (_dir, store) = store();
+        let config = Config {
+            active_provider: ProviderId::ElevenLabs,
+            ..Config::default()
+        };
+        store.save(&config).expect("save");
+        let before = fs::read_to_string(store.path()).expect("read");
+
+        let loaded = store.load_or_init().expect("load");
+
+        assert_eq!(loaded.active_provider, ProviderId::ElevenLabs);
+        assert_eq!(fs::read_to_string(store.path()).expect("reread"), before);
     }
 
     #[test]

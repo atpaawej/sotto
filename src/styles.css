@@ -279,12 +279,137 @@ body {
   color: var(--faint);
 }
 
+/* Dictation: the one live surface. Red means recording, and nothing else. */
+
+.dictation {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--paper);
+  font: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 140ms var(--ease-out);
+}
+
+.button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 86%, var(--paper));
+}
+
+.button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.button-live {
+  background: var(--live);
+  color: var(--paper);
+}
+
+.button-live:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--live) 86%, black);
+}
+
+.recording-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.timer {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dictation-hint {
+  margin: 12px 0 0;
+  max-width: 54ch;
+  color: var(--muted);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.result {
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rule);
+  animation: result-enter 160ms var(--ease-out) both;
+}
+
+@keyframes result-enter {
+  from {
+    opacity: 0;
+  }
+}
+
+.transcript {
+  margin: 0;
+  max-width: 60ch;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 1.1875rem;
+  line-height: 1.55;
+  letter-spacing: 0;
+  text-wrap: pretty;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.result-meta {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+.timings {
+  margin: 4px 0 0;
+  color: var(--faint);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .section {
+  .section,
+  .result {
     animation: none;
   }
 
-  .nav-button {
+  .nav-button,
+  .button {
     transition: none;
+  }
+
+  .recording-dot {
+    animation: none;
   }
 }

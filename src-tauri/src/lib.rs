@@ -1,14 +1,18 @@
 //! The Sotto desktop shell.
 //!
-//! Today the window is a shell: it shows where settings live and whether they
-//! loaded. The dictation itself lands in later tickets behind the same
-//! `DictationSession` seam.
+//! The window reads settings, and the Speech section runs one dictation at a
+//! time through [`dictation::Dictation`]. Hotkey and pill arrive in later
+//! tickets; today a button is the only way to start one.
 
+mod audio;
 mod config;
+mod dictation;
+mod transcribe;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use config::{describe, Config, ConfigStore};
+use dictation::{Attempt, Dictation};
 use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -21,7 +25,8 @@ struct AppState {
     /// The loaded config, or the reason it could not be loaded. It is kept in
     /// state rather than returned from setup so the window can still open and
     /// show the problem (ADR-0001).
-    loaded: Mutex<Result<Config, String>>,
+    loaded: Arc<Mutex<Result<Config, String>>>,
+    dictation: Arc<Dictation>,
 }
 
 #[derive(Serialize)]
@@ -56,6 +61,44 @@ fn config_snapshot(state: State<'_, AppState>) -> Result<ConfigSnapshot, String>
         mode: unix_mode(&metadata),
         config,
     })
+}
+
+#[tauri::command]
+async fn dictation_start(state: State<'_, AppState>) -> Result<(), String> {
+    let dictation = Arc::clone(&state.dictation);
+    let config = loaded_config(&state)?;
+
+    // Opening the microphone and waiting for it to run blocks, so it never
+    // happens on the thread that paints the window.
+    tauri::async_runtime::spawn_blocking(move || dictation.start(&config))
+        .await
+        .map_err(|error| format!("the microphone task failed: {error}"))?
+        .map_err(|error| describe(&error))
+}
+
+#[tauri::command]
+async fn dictation_stop(state: State<'_, AppState>) -> Result<Attempt, String> {
+    let dictation = Arc::clone(&state.dictation);
+    let config = loaded_config(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || dictation.stop(&config))
+        .await
+        .map_err(|error| format!("the dictation task failed: {error}"))?
+        .map_err(|error| describe(&error))
+}
+
+#[tauri::command]
+fn dictation_recording(state: State<'_, AppState>) -> bool {
+    state.dictation.is_recording()
+}
+
+/// The config, or the reason it is unavailable, as a message fit for the window.
+fn loaded_config(state: &State<'_, AppState>) -> Result<Config, String> {
+    state
+        .loaded
+        .lock()
+        .map_err(|_| "the config state was left locked by a panicking thread".to_owned())?
+        .clone()
 }
 
 #[tauri::command]
@@ -98,7 +141,13 @@ fn show_main(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![config_snapshot, app_info])
+        .invoke_handler(tauri::generate_handler![
+            config_snapshot,
+            app_info,
+            dictation_start,
+            dictation_stop,
+            dictation_recording,
+        ])
         .setup(|app| {
             let path = ConfigStore::default_path()
                 .map_err(|error| std::io::Error::other(describe(&error)))?;
@@ -112,7 +161,8 @@ pub fn run() {
 
             app.manage(AppState {
                 store,
-                loaded: Mutex::new(loaded),
+                loaded: Arc::new(Mutex::new(loaded)),
+                dictation: Arc::new(Dictation::new()),
             });
 
             let open = MenuItem::with_id(app, "open", "Open Sotto", true, None::<&str>)?;
