@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
 cpal = "0.15"
 dirs = "6"
 evdev = "0.13"

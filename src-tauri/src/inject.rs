@@ -1,17 +1,16 @@
 //! Putting text into the app that had focus.
 //!
-//! The clipboard (`wl-copy`) carries the text because keysym typing silently
-//! drops every character the keymap cannot produce (ADR-0006). The Ctrl+V that
-//! pastes it goes through a kernel virtual keyboard (`/dev/uinput`) via
-//! [`crate::keyboard`].
+//! `arboard` (with `wayland-data-control`) writes the clipboard in-process so
+//! any Unicode text survives, and [`crate::keyboard`] presses `Ctrl+V` through
+//! `/dev/uinput`.
 
 use std::{
-    io::Write as _,
-    process::{Command, Stdio},
     sync::mpsc::SyncSender,
-    time::{Duration, Instant},
+    thread,
+    time::Duration,
 };
 
+use arboard::Clipboard;
 use evdev::uinput::VirtualDevice;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -21,8 +20,8 @@ use crate::{
     session::InjectPort,
 };
 
-/// How long to wait for the clipboard to be served before pasting anyway.
-const CLIPBOARD_WAIT: Duration = Duration::from_millis(500);
+/// Brief settle time after setting the clipboard before pressing Ctrl+V.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(50);
 
 /// A handle the session thread can call without knowing about the uinput worker.
 pub struct PortalInjector {
@@ -78,6 +77,8 @@ async fn serve(
 ) {
     let mut device: Option<VirtualDevice> = None;
     let mut problem: Option<String> = None;
+    // Keep the Clipboard instance alive so Wayland continues serving the selection.
+    let mut clipboard: Option<Clipboard> = None;
 
     loop {
         if device.is_none() {
@@ -113,11 +114,14 @@ async fn serve(
             }
             Some(job) = jobs.recv() => {
                 let result = match device.as_mut() {
-                    Some(dev) => deliver(dev, &job.text),
+                    Some(dev) => deliver(dev, &mut clipboard, &job.text),
                     None => Err(problem
                         .clone()
                         .unwrap_or_else(|| "virtual keyboard access was not granted".to_owned())),
                 };
+                if let Err(ref error) = result {
+                    eprintln!("inject: delivery failed: {error}");
+                }
                 let _ = job.reply.send(result);
             }
             else => break,
@@ -125,104 +129,23 @@ async fn serve(
     }
 }
 
-fn deliver(device: &mut VirtualDevice, text: &str) -> Result<(), String> {
-    let previous = read_clipboard();
-    set_clipboard(text)?;
-    wait_for_clipboard();
-
-    keyboard::tap(device, &keyboard::PASTE)?;
-
-    restore_clipboard(previous, text);
-    Ok(())
-}
-
-/// Replaces the clipboard. `wl-copy` forks and serves the selection, so the
-/// text survives after the command exits.
-fn set_clipboard(text: &str) -> Result<(), String> {
-    let mut child = Command::new("wl-copy")
-        .arg("--type")
-        .arg("text/plain")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "wl-copy is missing; install wl-clipboard, then dictate again".to_owned()
-            } else {
-                format!("could not start wl-copy: {error}")
-            }
-        })?;
-
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "wl-copy did not accept any input".to_owned())?
-        .write_all(text.as_bytes())
-        .map_err(|error| format!("could not write to the clipboard: {error}"))?;
-
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("wl-copy did not finish: {error}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "wl-copy failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+fn deliver(
+    device: &mut VirtualDevice,
+    clipboard: &mut Option<Clipboard>,
+    text: &str,
+) -> Result<(), String> {
+    if clipboard.is_none() {
+        *clipboard = Some(
+            Clipboard::new().map_err(|error| format!("could not open clipboard: {error}"))?,
+        );
     }
-    Ok(())
-}
 
-/// The clipboard is a service, not a variable: a paste before it is serving
-/// reads the old contents.
-fn wait_for_clipboard() {
-    let started = Instant::now();
-    while started.elapsed() < CLIPBOARD_WAIT {
-        if Command::new("wl-paste")
-            .arg("--list-types")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("text/plain")
-            })
-            .unwrap_or(false)
-        {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    if let Some(cb) = clipboard.as_mut() {
+        cb.set_text(text.to_owned())
+            .map_err(|error| format!("could not write to the clipboard: {error}"))?;
     }
-}
 
-fn read_clipboard() -> Option<String> {
-    let output = Command::new("wl-paste")
-        .arg("--no-newline")
-        .arg("--type")
-        .arg("text/plain")
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() || output.stdout.is_empty() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
-}
-
-/// Best effort, as ADR-0004 asks: put the user's clipboard back unless they
-/// copied something else in the meantime.
-fn restore_clipboard(previous: Option<String>, ours: &str) {
-    let Some(previous) = previous else {
-        return;
-    };
-    let ours = ours.to_owned();
-
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(1_200));
-        if read_clipboard().as_deref() == Some(ours.as_str()) {
-            let _ = set_clipboard(&previous);
-        }
-    });
+    thread::sleep(CLIPBOARD_SETTLE);
+    eprintln!("inject: pasting {} bytes via uinput", text.len());
+    keyboard::tap(device, &keyboard::PASTE)
 }

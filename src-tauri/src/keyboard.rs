@@ -15,9 +15,11 @@ use evdev::{
 /// How long the keys stay down. A press and its release in the same batch is
 /// not a keystroke to most toolkits; they need to arrive separately.
 const HOLD: Duration = Duration::from_millis(20);
+/// Delay between modifier and key edges so compositors update XKB state first.
+const STEP: Duration = Duration::from_millis(15);
 
-/// Ctrl+V, which every GUI toolkit reads as paste.
-pub const PASTE: [KeyCode; 2] = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V];
+/// Ctrl+Shift+V, which pastes in Linux terminals and modern GUI apps.
+pub const PASTE: [KeyCode; 3] = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_V];
 
 /// The one-time grant, shown in the window while `/dev/uinput` is not writable.
 pub const SETUP: &str = "\
@@ -57,19 +59,35 @@ fn describe(error: std::io::Error, step: &str) -> String {
     }
 }
 
-/// Presses the chord, waits for the target app to see it, releases it again.
+/// Presses each key in order, holds, then releases in reverse order so the
+/// compositor updates modifier state before the target key arrives.
 pub fn tap(device: &mut VirtualDevice, chord: &[KeyCode]) -> Result<(), String> {
-    device
-        .emit(&events(chord, 1))
-        .map_err(|error| format!("the virtual keyboard would not press Ctrl+V: {error}"))?;
+    for (index, key) in chord.iter().enumerate() {
+        if index > 0 {
+            thread::sleep(STEP);
+        }
+        device
+            .emit(&[InputEvent::new(EventType::KEY.0, key.code(), 1)])
+            .map_err(|error| format!("the virtual keyboard would not press Ctrl+V: {error}"))?;
+    }
+
     thread::sleep(HOLD);
-    device
-        .emit(&events(chord, 0))
-        .map_err(|error| format!("the virtual keyboard would not release Ctrl+V: {error}"))
+
+    for (index, key) in chord.iter().rev().enumerate() {
+        if index > 0 {
+            thread::sleep(STEP);
+        }
+        device
+            .emit(&[InputEvent::new(EventType::KEY.0, key.code(), 0)])
+            .map_err(|error| format!("the virtual keyboard would not release Ctrl+V: {error}"))?;
+    }
+
+    Ok(())
 }
 
 /// The events for one edge of the chord. Releases undo the presses in the
 /// opposite order, so a slow target app never sees the modifier go up first.
+#[cfg(test)]
 pub fn events(chord: &[KeyCode], value: i32) -> Vec<InputEvent> {
     let keys: Vec<KeyCode> = if value == 0 {
         chord.iter().rev().copied().collect()

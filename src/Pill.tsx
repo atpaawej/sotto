@@ -58,7 +58,12 @@ export default function Pill() {
   }, [dictation?.phase]);
 
   if (!dictation || dictation.phase === "idle") {
-    return <div className="pill pill-empty" aria-hidden="true" />;
+    return (
+      <div className="pill pill-idle" aria-label="Sotto ready">
+        <span className="pill-idle-dot" aria-hidden="true" />
+        <span className="pill-idle-bar" aria-hidden="true" />
+      </div>
+    );
   }
 
   const { phase, locked, tapMode, message } = dictation;
