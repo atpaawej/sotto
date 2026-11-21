@@ -9,6 +9,7 @@ mod config;
 mod dictation;
 mod hotkey;
 mod inject;
+mod keyboard;
 mod pill;
 mod portal;
 mod session;
@@ -42,8 +43,9 @@ struct AppState {
     inbox: mpsc::Sender<Input>,
     view: session::SharedView,
     access: SharedAccess,
-    /// Asking again for keyboard access after the dialog was dismissed.
-    retry: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Asking again for `/dev/input` and `/dev/uinput` access after setup.
+    retry_inject: tokio::sync::mpsc::UnboundedSender<()>,
+    retry_hotkey: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 #[derive(Serialize)]
@@ -133,9 +135,13 @@ fn access_status(state: State<'_, AppState>) -> portal::Access {
 #[tauri::command]
 fn retry_keyboard_access(state: State<'_, AppState>) -> Result<(), String> {
     state
-        .retry
+        .retry_inject
         .send(())
-        .map_err(|_| "the keyboard bridge is not running".to_owned())
+        .map_err(|_| "the keyboard bridge is not running".to_owned())?;
+    state
+        .retry_hotkey
+        .send(())
+        .map_err(|_| "the hotkey listener is not running".to_owned())
 }
 
 fn send(state: &State<'_, AppState>, input: Input) -> Result<(), String> {
@@ -210,18 +216,11 @@ pub fn run() {
             let config = loaded.clone().unwrap_or_default();
 
             let access = portal::shared_access();
-            if let Err(problem) = tauri::async_runtime::block_on(portal::register()) {
-                eprintln!("portal: {problem}");
-                portal::update(&access, |state| {
-                    state.hotkey.problem = Some(problem.clone());
-                    state.injection.problem = Some(problem);
-                });
-            }
 
             pill::create(app.handle()).map_err(std::io::Error::other)?;
 
             let bridge = inject::bridge(Arc::clone(&access));
-            let retry = bridge.retry.clone();
+            let retry_inject = bridge.retry.clone();
             let view = session::shared_view();
             let (inbox, inbox_rx) = mpsc::channel::<Input>();
 
@@ -234,11 +233,12 @@ pub fn run() {
                 bridge,
             );
 
-            let preferred = hotkey::preferred_trigger(&config.trigger_key);
+            let (retry_hotkey, retry_hotkey_rx) = tokio::sync::mpsc::unbounded_channel();
             tauri::async_runtime::spawn(hotkey::serve(
                 Arc::clone(&access),
                 inbox.clone(),
-                preferred,
+                config.trigger_key.clone(),
+                retry_hotkey_rx,
             ));
 
             app.manage(AppState {
@@ -247,7 +247,8 @@ pub fn run() {
                 inbox,
                 view,
                 access,
-                retry,
+                retry_inject,
+                retry_hotkey,
             });
 
             let open = MenuItem::with_id(app, "open", "Open Sotto", true, None::<&str>)?;

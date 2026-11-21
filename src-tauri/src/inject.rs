@@ -1,12 +1,9 @@
 //! Putting text into the app that had focus.
 //!
-//! The clipboard carries the text because keysym typing silently drops every
-//! character the keymap cannot produce (ADR-0006). The Ctrl+V that pastes it is
-//! three ASCII keysyms through a RemoteDesktop session, which the portal grants
-//! with a dialog.
-//!
-//! The portal session lives in its own task. Injection requests cross a channel,
-//! because the state machine runs on a plain thread and the portal speaks async.
+//! The clipboard (`wl-copy`) carries the text because keysym typing silently
+//! drops every character the keymap cannot produce (ADR-0006). The Ctrl+V that
+//! pastes it goes through a kernel virtual keyboard (`/dev/uinput`) via
+//! [`crate::keyboard`].
 
 use std::{
     io::Write as _,
@@ -15,24 +12,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ashpd::desktop::{
-    remote_desktop::{DeviceType, KeyState, RemoteDesktop},
-    PersistMode, Session,
-};
+use evdev::uinput::VirtualDevice;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::{
+    keyboard,
     portal::{self, SharedAccess},
     session::InjectPort,
 };
 
-const CONTROL_L: i32 = 0xffe3;
-const V: i32 = 0x76;
-
 /// How long to wait for the clipboard to be served before pasting anyway.
 const CLIPBOARD_WAIT: Duration = Duration::from_millis(500);
 
-/// A handle the session thread can call without knowing about the portal.
+/// A handle the session thread can call without knowing about the uinput worker.
 pub struct PortalInjector {
     jobs: UnboundedSender<Job>,
 }
@@ -59,7 +51,7 @@ impl InjectPort for PortalInjector {
 }
 
 /// Where the session thread's injector comes from, plus the retry handle the
-/// window uses when the user dismissed the permission dialog.
+/// window uses after the user grants `/dev/uinput` access.
 pub struct Bridge {
     pub injector: PortalInjector,
     pub retry: UnboundedSender<()>,
@@ -79,22 +71,19 @@ pub fn bridge(access: SharedAccess) -> Bridge {
     }
 }
 
-type Desk = RemoteDesktop<'static>;
-type DeskSession = Session<'static, Desk>;
-
 async fn serve(
     access: SharedAccess,
     mut jobs: UnboundedReceiver<Job>,
     mut retries: UnboundedReceiver<()>,
 ) {
-    let mut desk: Option<(Desk, DeskSession)> = None;
+    let mut device: Option<VirtualDevice> = None;
     let mut problem: Option<String> = None;
 
     loop {
-        if desk.is_none() {
-            match open(access.clone()).await {
-                Ok(pair) => {
-                    desk = Some(pair);
+        if device.is_none() {
+            match keyboard::open() {
+                Ok(dev) => {
+                    device = Some(dev);
                     problem = None;
                     portal::update(&access, |state| {
                         state.injection.ready = true;
@@ -102,11 +91,16 @@ async fn serve(
                     });
                 }
                 Err(reason) => {
+                    let full = format!(
+                        "{reason}\n\n{}\n{}",
+                        keyboard::SETUP,
+                        keyboard::SETUP_FOOTNOTE
+                    );
                     eprintln!("inject: {reason}");
-                    problem = Some(reason.clone());
+                    problem = Some(full.clone());
                     portal::update(&access, |state| {
                         state.injection.ready = false;
-                        state.injection.problem = Some(reason);
+                        state.injection.problem = Some(full);
                     });
                 }
             }
@@ -114,15 +108,15 @@ async fn serve(
 
         tokio::select! {
             Some(()) = retries.recv() => {
-                desk = None;
+                device = None;
                 continue;
             }
             Some(job) = jobs.recv() => {
-                let result = match &desk {
-                    Some((proxy, session)) => deliver(proxy, session, &job.text).await,
+                let result = match device.as_mut() {
+                    Some(dev) => deliver(dev, &job.text),
                     None => Err(problem
                         .clone()
-                        .unwrap_or_else(|| "keyboard access was not granted".to_owned())),
+                        .unwrap_or_else(|| "virtual keyboard access was not granted".to_owned())),
                 };
                 let _ = job.reply.send(result);
             }
@@ -131,69 +125,15 @@ async fn serve(
     }
 }
 
-/// Asks for a keyboard session. This is the dialog the user sees once per
-/// launch: GNOME returns no restore token, so it cannot be remembered.
-async fn open(access: SharedAccess) -> Result<(Desk, DeskSession), String> {
-    let proxy = RemoteDesktop::new()
-        .await
-        .map_err(|error| format!("the remote desktop portal is unavailable: {error}"))?;
-    let session = proxy
-        .create_session()
-        .await
-        .map_err(|error| format!("the portal would not open a keyboard session: {error}"))?;
-
-    proxy
-        .select_devices(
-            &session,
-            DeviceType::Keyboard.into(),
-            None,
-            PersistMode::Application,
-        )
-        .await
-        .map_err(|error| format!("could not select the keyboard: {error}"))?
-        .response()
-        .map_err(|error| format!("the keyboard selection was refused: {error}"))?;
-
-    proxy
-        .start(&session, None)
-        .await
-        .map_err(|error| format!("could not start the keyboard session: {error}"))?
-        .response()
-        .map_err(|error| {
-            format!("keyboard access was refused ({error}); text cannot be typed until it is granted")
-        })?;
-
-    portal::update(&access, |state| {
-        state.injection.ready = true;
-        state.injection.problem = None;
-    });
-    Ok((proxy, session))
-}
-
-async fn deliver(proxy: &Desk, session: &DeskSession, text: &str) -> Result<(), String> {
+fn deliver(device: &mut VirtualDevice, text: &str) -> Result<(), String> {
     let previous = read_clipboard();
     set_clipboard(text)?;
     wait_for_clipboard();
 
-    press(proxy, session, CONTROL_L, KeyState::Pressed).await?;
-    press(proxy, session, V, KeyState::Pressed).await?;
-    press(proxy, session, V, KeyState::Released).await?;
-    press(proxy, session, CONTROL_L, KeyState::Released).await?;
+    keyboard::tap(device, &keyboard::PASTE)?;
 
     restore_clipboard(previous, text);
     Ok(())
-}
-
-async fn press(
-    proxy: &Desk,
-    session: &DeskSession,
-    keysym: i32,
-    state: KeyState,
-) -> Result<(), String> {
-    proxy
-        .notify_keyboard_keysym(session, keysym, state)
-        .await
-        .map_err(|error| format!("the portal would not press the paste keys: {error}"))
 }
 
 /// Replaces the clipboard. `wl-copy` forks and serves the selection, so the
@@ -286,4 +226,3 @@ fn restore_clipboard(previous: Option<String>, ours: &str) {
         }
     });
 }
-
