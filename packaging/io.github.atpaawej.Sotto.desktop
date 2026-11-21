@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Sotto
+GenericName=Dictation
+Comment=Hold a key, speak, and clean text lands where your cursor is
+Exec=sotto
+Icon=io.github.atpaawej.Sotto
+Terminal=false
+Categories=Utility;Accessibility;
+StartupWMClass=Sotto
