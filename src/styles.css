@@ -1,0 +1,290 @@
+@import "tailwindcss";
+
+/* Sotto reads as a quiet instrument: stone paper, ink, hairlines, no cards.
+   The one loud colour is signal red, and it only ever means "live". */
+
+:root {
+  --paper: #f1f0eb;
+  --panel: #e9e8e1;
+  --selected: #e0dfd6;
+  --ink: #1b1c19;
+  --muted: #6e6e64;
+  --faint: #8b8b80;
+  --rule: #d5d4cb;
+  --live: #b93a2b;
+  --live-wash: #f3e6e2;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  color-scheme: light dark;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #171815;
+    --panel: #1d1e1a;
+    --selected: #272822;
+    --ink: #ecebe4;
+    --muted: #9a998d;
+    --faint: #86857a;
+    --rule: #2c2d27;
+    --live: #e4553f;
+    --live-wash: #2a1d1a;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Instrument Sans Variable", system-ui, sans-serif;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  font-variant-numeric: proportional-nums;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--live) 24%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Sidebar */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 22px 12px 16px;
+  background: var(--panel);
+  border-right: 1px solid var(--rule);
+  overflow-y: auto;
+}
+
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0;
+  padding: 0 10px;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 1.375rem;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.wordmark::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--live);
+  transform: translateY(-7px);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nav-button {
+  position: relative;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.nav-button:hover {
+  background: color-mix(in srgb, var(--selected) 55%, transparent);
+  color: var(--ink);
+}
+
+.nav-button[aria-current="page"] {
+  background: var(--selected);
+  color: var(--ink);
+}
+
+.nav-button[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--ink);
+  transform: translateY(-50%);
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding: 0 10px;
+  color: var(--faint);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Content */
+
+.content {
+  overflow-y: auto;
+  padding: 44px 48px 56px;
+}
+
+.section {
+  max-width: 620px;
+  animation: section-enter 160ms var(--ease-out) both;
+}
+
+@keyframes section-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+.section-title {
+  margin: 0;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 1.625rem;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+
+.section-deck {
+  margin: 8px 0 0;
+  max-width: 58ch;
+  color: var(--muted);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.rows {
+  margin: 28px 0 0;
+  padding: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 20px;
+  padding: 13px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.row:last-child {
+  border-bottom: 1px solid var(--rule);
+}
+
+.row-label {
+  margin: 0;
+  color: var(--muted);
+}
+
+.row-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.row-hint {
+  margin: 3px 0 0;
+  color: var(--faint);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.75rem;
+  letter-spacing: -0.01em;
+}
+
+.rows + .empty-note {
+  margin-top: 14px;
+}
+
+.empty {
+  margin: 30px 0 0;
+  max-width: 52ch;
+}
+
+.empty-line {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.empty-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.notice {
+  margin: 0 0 26px;
+  padding: 12px 14px;
+  border: 1px solid var(--live);
+  border-radius: 8px;
+  background: var(--live-wash);
+}
+
+.notice-title {
+  margin: 0;
+  font-weight: 500;
+}
+
+.notice-detail {
+  margin: 6px 0 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.quiet {
+  margin: 0;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .section {
+    animation: none;
+  }
+
+  .nav-button {
+    transition: none;
+  }
+}
