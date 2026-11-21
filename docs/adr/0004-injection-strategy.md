@@ -1,5 +1,7 @@
 # Injection order: libei first, clipboard second, ydotool optional
 
+> Amended by ADR-0006: libei-types-nothing-it-lacks was wrong. Keysym typing drops every character the active keymap cannot produce, so the clipboard leads and libei injection is the fallback. The seam and the adapters below still stand.
+
 Text reaches the focused app through one of three adapters behind the `TextInjector` seam, tried in this order: libei (via the RemoteDesktop portal), clipboard write plus a synthetic Ctrl+V, then ydotool. On X11 the same seam is satisfied by XTest.
 
 ## Why
