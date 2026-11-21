@@ -1,0 +1,4 @@
+# Allow active local users (uaccess) and members of the `input` group to read
+# keyboard events and create a virtual keyboard via /dev/uinput for Sotto.
+KERNEL=="uinput", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", GROUP="input", MODE="0660", TAG+="uaccess"

@@ -413,3 +413,329 @@ body {
     animation: none;
   }
 }
+
+/* The pill: a second window, transparent, bottom centre, no chrome at all.
+   It never takes focus, so the app underneath keeps the cursor. */
+
+body.pill-body {
+  background: transparent;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+
+.pill-body #root {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 8px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 356px;
+  padding: 9px 14px;
+  border: 1px solid rgb(241 240 235 / 0.14);
+  border-radius: 999px;
+  background: rgb(24 25 22 / 0.94);
+  color: #f1f0eb;
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.28),
+    0 10px 30px rgb(0 0 0 / 0.26);
+  font-size: 0.8125rem;
+  font-weight: 450;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.pill-clickable {
+  cursor: pointer;
+}
+
+.pill-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pill-idle {
+  padding: 6px 13px;
+  opacity: 0.74;
+  background: rgb(24 25 22 / 0.86);
+  transition:
+    opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    border-color 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.pill-hover {
+  padding: 8px 14px;
+  opacity: 0.96;
+  border-color: rgb(241 240 235 / 0.22);
+}
+
+.pill-idle-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgb(241 240 235 / 0.58);
+  transition: background-color 160ms ease;
+}
+
+.pill-idle-dot-active {
+  background: #e4553f;
+}
+
+.pill-idle-bar {
+  width: 26px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgb(241 240 235 / 0.26);
+}
+
+.pill-hint-text {
+  font-size: 0.78rem;
+  color: rgb(241 240 235 / 0.88);
+}
+
+.pill-kbd {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border: 1px solid rgb(241 240 235 / 0.22);
+  border-radius: 5px;
+  background: rgb(241 240 235 / 0.08);
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #f1f0eb;
+}
+
+.pill-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 2px;
+}
+
+.pill-bar {
+  width: 2.5px;
+  height: 14px;
+  border-radius: 999px;
+  background: #e4553f;
+  transform-origin: center;
+  transition: transform 65ms ease-out;
+}
+
+.pill-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e4553f;
+  box-shadow: 0 0 0 0 rgb(228 85 63 / 0.5);
+  animation: pill-live 1.8s ease-out infinite;
+}
+
+@keyframes pill-live {
+  0% {
+    box-shadow: 0 0 0 0 rgb(228 85 63 / 0.45);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 7px rgb(228 85 63 / 0);
+  }
+}
+
+.pill-spinner {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid rgb(241 240 235 / 0.28);
+  border-top-color: #f1f0eb;
+  border-radius: 50%;
+  animation: pill-spin 700ms linear infinite;
+}
+
+@keyframes pill-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.pill-check {
+  flex: none;
+  font-size: 0.75rem;
+  color: #9fc49a;
+}
+
+.pill-mark {
+  flex: none;
+  width: 8px;
+  text-align: center;
+  color: #e4553f;
+}
+
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.pill-time {
+  flex: none;
+  color: rgb(241 240 235 / 0.62);
+  font-variant-numeric: tabular-nums;
+}
+
+.pill-cancel {
+  flex: none;
+  margin-left: 2px;
+  padding: 3px 9px;
+  border: 1px solid rgb(241 240 235 / 0.22);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease-out);
+}
+
+.pill-cancel:hover {
+  background: rgb(241 240 235 / 0.12);
+}
+
+.pill-failed,
+.pill-hint {
+  border-radius: 16px;
+  padding: 10px 12px;
+  white-space: normal;
+  border-color: rgb(228 85 63 / 0.42);
+}
+
+.pill-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+  max-width: 332px;
+}
+
+.pill-error-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pill-error-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #f1f0eb;
+}
+
+.pill-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgb(241 240 235 / 0.6);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.pill-dismiss:active,
+.pill-cancel:active,
+.pill-action:active {
+  transform: scale(0.97);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pill-dismiss:hover {
+    background: rgb(241 240 235 / 0.14);
+    color: #f1f0eb;
+  }
+}
+
+.pill-error-message {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: rgb(241 240 235 / 0.8);
+  text-wrap: pretty;
+  overflow-wrap: break-word;
+}
+
+.pill-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.pill-action {
+  padding: 3px 10px;
+  border: 1px solid rgb(241 240 235 / 0.24);
+  border-radius: 999px;
+  background: rgb(241 240 235 / 0.1);
+  color: #f1f0eb;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.pill-action-secondary {
+  background: transparent;
+  color: rgb(241 240 235 / 0.82);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pill-action:hover {
+    background: rgb(241 240 235 / 0.18);
+  }
+}
+
+.button-quiet {
+  margin-top: 10px;
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--ink);
+}
+
+.button-quiet:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--selected) 60%, transparent);
+}
+
+.notice .button-quiet {
+  margin-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill,
+  .pill-bar,
+  .pill-spinner {
+    animation: none;
+    transition: none;
+  }
+}

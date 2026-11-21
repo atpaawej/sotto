@@ -1,15 +1,21 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
-  isRecording,
+  cancelDictation,
+  DICTATION_EVENT,
   keyLabel,
   providerLabel,
+  readAccess,
   readAppInfo,
   readConfig,
-  startDictation,
-  stopDictation,
+  readDictationState,
+  retryKeyboardAccess,
+  toggleDictation,
+  type Access,
   type AppInfo,
   type Attempt,
   type ConfigSnapshot,
+  type DictationState,
 } from "./lib/api";
 
 type Loaded =
@@ -31,7 +37,26 @@ type SectionId = (typeof SECTIONS)[number]["id"];
 export default function App() {
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [active, setActive] = useState<SectionId>("general");
+  const [access, setAccess] = useState<Access | null>(null);
 
+  const refreshAccess = useCallback(() => {
+    readAccess().then(setAccess, () => {
+      // The window can still work without the status; it only loses detail.
+    });
+  }, []);
+
+  useEffect(() => {
+    refreshAccess();
+  }, [refreshAccess]);
+
+  // The portal answers its dialogs late, so poll until both capabilities are
+  // settled rather than leaving the window showing a stale "not bound".
+  useEffect(() => {
+    if (!access) return;
+    if (access.hotkey.bound && access.injection.ready) return;
+    const id = window.setInterval(refreshAccess, 2_000);
+    return () => window.clearInterval(id);
+  }, [access, refreshAccess]);
   useEffect(() => {
     let cancelled = false;
 
@@ -84,13 +109,28 @@ export default function App() {
           </div>
         )}
 
-        <Section id={active} loaded={loaded} />
+        <Section
+          id={active}
+          loaded={loaded}
+          access={access}
+          refreshAccess={refreshAccess}
+        />
       </main>
     </div>
   );
 }
 
-function Section({ id, loaded }: { id: SectionId; loaded: Loaded }) {
+function Section({
+  id,
+  loaded,
+  access,
+  refreshAccess,
+}: {
+  id: SectionId;
+  loaded: Loaded;
+  access: Access | null;
+  refreshAccess: () => void;
+}) {
   const snapshot = loaded.status === "ready" ? loaded.snapshot : undefined;
   const info = loaded.status === "ready" ? loaded.info : undefined;
 
@@ -106,8 +146,14 @@ function Section({ id, loaded }: { id: SectionId; loaded: Loaded }) {
             <dl className="rows">
               <Row
                 label="Trigger key"
-                value={keyLabel(snapshot.config.trigger_key)}
-                hint="Hold to talk. Double-tap to lock it on."
+                value={
+                  access?.hotkey.trigger ?? keyLabel(snapshot.config.trigger_key)
+                }
+                hint={
+                  access?.hotkey.bound
+                    ? "Hold to dictate anywhere. Double-tap to lock it on."
+                    : "Not bound yet — Speech says what went wrong."
+                }
               />
               <Row
                 label="Provider"
@@ -131,7 +177,13 @@ function Section({ id, loaded }: { id: SectionId; loaded: Loaded }) {
       );
 
     case "speech":
-      return <SpeechSection snapshot={snapshot} />;
+      return (
+        <SpeechSection
+          snapshot={snapshot}
+          access={access}
+          refreshAccess={refreshAccess}
+        />
+      );
 
     case "cleanup":
       return (
@@ -244,103 +296,182 @@ function Rule({ label, on }: { label: string; on: boolean }) {
   return <Row label={label} value={on ? "On" : "Off"} />;
 }
 
-type Phase =
-  | { kind: "idle" }
-  | { kind: "starting" }
-  | { kind: "recording"; startedAt: number }
-  | { kind: "working" }
-  | { kind: "done"; attempt: Attempt }
-  | { kind: "failed"; message: string };
-
-function SpeechSection({ snapshot }: { snapshot?: ConfigSnapshot }) {
-  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+function SpeechSection({
+  snapshot,
+  access,
+  refreshAccess,
+}: {
+  snapshot?: ConfigSnapshot;
+  access: Access | null;
+  refreshAccess: () => void;
+}) {
+  const [dictation, setDictation] = useState<DictationState | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const since = useRef<number | null>(null);
 
   const hasKey = Boolean(snapshot?.config.providers.groq_key);
-  const recording = phase.kind === "recording";
-  const busy = phase.kind === "starting" || phase.kind === "working";
+  const phase = dictation?.phase ?? "idle";
+  const recording = phase === "listening";
+  const working = phase === "working";
 
-  // A reloaded window should still know a dictation is running.
+  // The hotkey can start a dictation while this window is closed, so the state
+  // comes from the backend rather than from clicks here.
   useEffect(() => {
     let cancelled = false;
-    isRecording().then(
-      (running) => {
-        if (!cancelled && running) {
-          setPhase({ kind: "recording", startedAt: Date.now() });
-        }
+
+    readDictationState().then(
+      (state) => {
+        if (!cancelled) setDictation(state);
       },
       () => {
-        // The window can still start a dictation; this is a best-effort resync.
+        // Events still arrive; only the initial resync is lost.
       },
     );
+
+    const unlisten = listen<DictationState>(DICTATION_EVENT, (event) => {
+      setDictation(event.payload);
+    });
+
     return () => {
       cancelled = true;
+      void unlisten.then((stop) => stop());
     };
   }, []);
 
   useEffect(() => {
-    if (phase.kind !== "recording") return;
-    const startedAt = phase.startedAt;
-    const tick = () => setElapsed(Date.now() - startedAt);
+    if (phase !== "listening") {
+      since.current = null;
+      setElapsed(0);
+      return;
+    }
+
+    // A dictation started by the hotkey arrives as an event, so the clock
+    // starts when this window hears about it.
+    since.current ??= Date.now();
+    const tick = () => {
+      if (since.current) setElapsed(Date.now() - since.current);
+    };
     tick();
     const id = window.setInterval(tick, 100);
     return () => window.clearInterval(id);
   }, [phase]);
 
   async function toggle() {
-    if (busy) return;
-
-    if (phase.kind === "recording") {
-      setPhase({ kind: "working" });
-      try {
-        const attempt = await stopDictation();
-        setPhase({ kind: "done", attempt });
-      } catch (error) {
-        setPhase({ kind: "failed", message: String(error) });
-      }
-      return;
-    }
-
-    setPhase({ kind: "starting" });
+    if (busy || working) return;
+    setBusy(true);
     try {
-      await startDictation();
-      setPhase({ kind: "recording", startedAt: Date.now() });
+      await toggleDictation();
     } catch (error) {
-      setPhase({ kind: "failed", message: String(error) });
+      setDictation({
+        phase: "failed",
+        locked: false,
+        tapMode: false,
+        message: String(error),
+        attempt: null,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancel() {
+    try {
+      await cancelDictation();
+    } catch (error) {
+      setDictation({
+        phase: "failed",
+        locked: false,
+        tapMode: false,
+        message: String(error),
+        attempt: null,
+      });
+    }
+  }
+
+  async function retryAccess() {
+    setRetrying(true);
+    try {
+      await retryKeyboardAccess();
+      window.setTimeout(refreshAccess, 800);
+    } catch (error) {
+      setDictation({
+        phase: "failed",
+        locked: false,
+        tapMode: false,
+        message: String(error),
+        attempt: null,
+      });
+    } finally {
+      setRetrying(false);
     }
   }
 
   const label = recording
-    ? "Stop and transcribe"
-    : phase.kind === "working"
+    ? "Stop and insert"
+    : working
       ? "Transcribing…"
-      : phase.kind === "starting"
-        ? "Opening the microphone…"
-        : "Start dictation";
+      : "Start dictation";
+
+  const trigger = access?.hotkey.trigger;
 
   return (
     <section className="section">
       <h1 className="section-title">Speech</h1>
       <p className="section-deck">
-        Groq transcribes every dictation with Whisper large v3 turbo, using the
-        key in your settings file. The hotkey arrives in a later build, so this
-        button is how you dictate for now.
+        {trigger
+          ? `Hold ${trigger} and speak; release and the words land where your cursor is. The audio goes to Groq with your key and nowhere else.`
+          : "Hold the shortcut and speak; the words land where your cursor is. The audio goes to Groq with your key and nowhere else."}
       </p>
+
+      {access?.hotkey.problem && (
+        <div className="notice" role="alert">
+          <p className="notice-title">The shortcut is not bound.</p>
+          <p className="notice-detail">{access.hotkey.problem}</p>
+        </div>
+      )}
+
+      {access?.injection.problem && (
+        <div className="notice" role="alert">
+          <p className="notice-title">Text cannot be typed yet.</p>
+          <p className="notice-detail">{access.injection.problem}</p>
+          <button
+            className="button button-quiet"
+            type="button"
+            onClick={() => void retryAccess()}
+            disabled={retrying}
+          >
+            {retrying ? "Asking…" : "Ask again"}
+          </button>
+        </div>
+      )}
 
       <div className="dictation">
         <button
           className={recording ? "button button-live" : "button"}
           type="button"
-          onClick={toggle}
-          disabled={!hasKey || busy}
+          onClick={() => void toggle()}
+          disabled={!hasKey || working || busy}
         >
           {recording && <span className="recording-dot" aria-hidden="true" />}
           {label}
         </button>
+
         {recording && (
           <span className="timer" role="timer" aria-live="off">
             {formatElapsed(elapsed)}
           </span>
+        )}
+
+        {working && (
+          <button
+            className="button button-quiet"
+            type="button"
+            onClick={() => void cancel()}
+          >
+            Cancel
+          </button>
         )}
       </div>
 
@@ -351,20 +482,30 @@ function SpeechSection({ snapshot }: { snapshot?: ConfigSnapshot }) {
             dictate. Keys never leave this machine except to the provider.
           </>
         ) : recording ? (
-          "Recording. Press stop when you have finished."
+          dictation?.tapMode || dictation?.locked
+            ? "Recording. Tap the shortcut again when you have finished."
+            : "Recording. Release the shortcut when you have finished."
+        ) : working ? (
+          "The recording is on its way. Cancel keeps it out of your document."
+        ) : phase === "hint" && dictation?.message ? (
+          dictation.message
+        ) : trigger ? (
+          `Hold ${trigger} anywhere. Double-tap to lock it on until the next tap.`
         ) : (
           "Speak naturally. The audio is deleted as soon as the text comes back."
         )}
       </p>
 
-      {phase.kind === "failed" && (
+      {phase === "failed" && dictation?.message && (
         <div className="notice" role="alert">
           <p className="notice-title">That dictation did not go through.</p>
-          <p className="notice-detail">{phase.message}</p>
+          <p className="notice-detail">{dictation.message}</p>
         </div>
       )}
 
-      {phase.kind === "done" && <Result attempt={phase.attempt} />}
+      {phase === "done" && dictation?.attempt && (
+        <Result attempt={dictation.attempt} />
+      )}
     </section>
   );
 }

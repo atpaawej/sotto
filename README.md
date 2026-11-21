@@ -39,18 +39,22 @@ it is — the app never resets your settings to recover from a bad byte.
 ## Desktop entry
 
 The app id is `io.github.atpaawej.Sotto`, which Wayland portals resolve through a
-`.desktop` file. To install one for a local build:
+`.desktop` file, and the portal only finds that file when its `Exec` points at a
+binary that exists. Install it after building, or the shortcut and text
+injection fail with "App info not found":
 
 ```sh
 scripts/install-dev-desktop.sh --dev    # Exec points at the debug binary
-scripts/install-dev-desktop.sh          # Exec=sotto, for an installed binary
+scripts/install-dev-desktop.sh          # Exec points at `sotto`, or target/release
 ```
+
+Injection also needs `wl-clipboard` (`wl-copy`) on `PATH`.
 
 ## Checks
 
 ```sh
 npm run build                     # typecheck and bundle the interface
-cd src-tauri && cargo test        # config storage and its failure modes
+cd src-tauri && cargo test        # session rules, adapters, config storage
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 ```
 

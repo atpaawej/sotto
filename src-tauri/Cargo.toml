@@ -13,14 +13,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
 cpal = "0.15"
 dirs = "6"
+evdev = "0.13"
 hound = "3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
 thiserror = "2"
+tokio = { version = "1", features = ["sync", "macros", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

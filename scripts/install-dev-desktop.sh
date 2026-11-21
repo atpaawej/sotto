@@ -9,10 +9,22 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 data=${XDG_DATA_HOME:-$HOME/.local/share}
-exec_line="sotto"
 
+# The portal resolves an app id through the desktop file's Exec: an entry whose
+# command cannot be run is invisible to it, and registration fails with "App
+# info not found". So the path is always absolute and always exists.
 if [[ "${1:-}" == "--dev" ]]; then
   exec_line="$root/src-tauri/target/debug/sotto"
+else
+  exec_line="$(command -v sotto || true)"
+  if [[ -z "$exec_line" ]]; then
+    exec_line="$root/src-tauri/target/release/sotto"
+  fi
+fi
+
+if [[ ! -x "$exec_line" ]]; then
+  echo "no runnable binary at $exec_line; build it before installing the entry" >&2
+  exit 1
 fi
 
 applications="$data/applications"

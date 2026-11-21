@@ -13,7 +13,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    audio::{self, AudioError, Capture},
+    audio::{self, AudioError, Capture, LevelCallback},
     config::{Config, ProviderId},
     transcribe::{Groq, Request, TranscribeError, Transcriber},
 };
@@ -41,6 +41,19 @@ pub struct Attempt {
     pub model: String,
     pub duration_ms: u64,
     pub timings: Timings,
+}
+
+/// What the microphone produced, encoded and ready to send.
+#[derive(Debug, Clone)]
+pub struct Captured {
+    pub wav: Vec<u8>,
+    pub duration_ms: u64,
+    /// Stopping the microphone and collecting what it captured.
+    pub stop_ms: u64,
+    /// Mixing down, resampling and writing the WAV.
+    pub encode_ms: u64,
+    /// Nothing louder than the room; sending it would only cost time.
+    pub silent: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,7 +86,16 @@ impl Dictation {
     ///
     /// Refusing before recording, rather than after, is the difference between
     /// "add a key" and "you just spoke for ten seconds and lost it".
+    #[cfg(test)]
     pub fn start(&self, config: &Config) -> Result<(), DictationError> {
+        self.start_with_levels(config, None)
+    }
+
+    pub fn start_with_levels(
+        &self,
+        config: &Config,
+        on_level: Option<LevelCallback>,
+    ) -> Result<(), DictationError> {
         match config.active_provider {
             ProviderId::Groq => {
                 if config
@@ -96,16 +118,15 @@ impl Dictation {
         if slot.is_some() {
             return Err(DictationError::AlreadyRecording);
         }
-        *slot = Some(Capture::start()?);
+        *slot = Some(Capture::start_with_levels(on_level)?);
         Ok(())
     }
 
-    pub fn is_recording(&self) -> bool {
-        self.capture.lock().map(|slot| slot.is_some()).unwrap_or(false)
-    }
-
-    /// Stops the microphone and transcribes what it heard.
-    pub fn stop(&self, config: &Config) -> Result<Attempt, DictationError> {
+    /// Stops the microphone and encodes what it heard, without sending it.
+    ///
+    /// Splitting the stop from the upload is what lets the session decide not
+    /// to spend a request on half a second of room tone.
+    pub fn stop_recording(&self) -> Result<Captured, DictationError> {
         let capture = self
             .capture
             .lock()
@@ -118,10 +139,31 @@ impl Dictation {
         let audio = capture.stop()?;
         let stop_ms = millis(total.elapsed());
         let duration_ms = millis(audio.duration());
+        let silent = audio.is_silent();
 
         let encoding = Instant::now();
         let wav = audio::encode_wav(&audio)?;
         let encode_ms = millis(encoding.elapsed());
+
+        Ok(Captured {
+            wav,
+            duration_ms,
+            stop_ms,
+            encode_ms,
+            silent,
+        })
+    }
+
+    /// Sends a finished recording to the configured provider.
+    pub fn transcribe(config: &Config, captured: &Captured) -> Result<Attempt, DictationError> {
+        let total = Instant::now();
+        let Captured {
+            wav,
+            duration_ms,
+            stop_ms,
+            encode_ms,
+            ..
+        } = captured.clone();
 
         let (provider, transcriber, model): (_, Box<dyn Transcriber>, String) =
             match config.active_provider {
@@ -165,10 +207,11 @@ impl Dictation {
                 encode_ms,
                 upload_ms,
                 provider_ms,
-                total_ms: millis(total.elapsed()),
+                total_ms: stop_ms + encode_ms + millis(total.elapsed()),
             },
         })
     }
+
 }
 
 /// Splits a round trip into "sending" and "the provider thinking".
@@ -240,7 +283,10 @@ mod tests {
             error,
             DictationError::Transcribe(TranscribeError::MissingKey)
         ));
-        assert!(!dictation.is_recording());
+        assert!(matches!(
+            dictation.stop_recording(),
+            Err(DictationError::NotRecording)
+        ));
     }
 
     #[test]
@@ -276,7 +322,8 @@ mod tests {
         let started = Instant::now();
         dictation.start(&config).expect("the microphone opens");
         std::thread::sleep(Duration::from_secs(10));
-        let attempt = dictation.stop(&config).expect("the provider answers");
+        let captured = dictation.stop_recording().expect("the recording stops");
+        let attempt = Dictation::transcribe(&config, &captured).expect("the provider answers");
 
         println!("recorded {} ms of audio", attempt.duration_ms);
         println!("timings: {:?}", attempt.timings);
@@ -292,7 +339,9 @@ mod tests {
     #[test]
     fn stopping_without_starting_is_an_error_not_an_empty_transcript() {
         let dictation = Dictation::new();
-        let error = dictation.stop(&Config::default()).expect_err("nothing to stop");
+        let error = dictation
+            .stop_recording()
+            .expect_err("nothing to stop");
         assert!(matches!(error, DictationError::NotRecording));
     }
 }

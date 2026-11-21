@@ -8,6 +8,8 @@ Probing on xdg-desktop-portal 1.21.1: `GlobalShortcuts.CreateSession` failed wit
 
 Registration only succeeds when the id can be matched to a `.desktop` file of the same name. `coucou.desktop` with an app id of `fr.louisraille.coucou` fails; renaming the file fixes it. Our identifier already matches our entry name, and `scripts/install-dev-desktop.sh` puts that entry where the portal looks — but a dev build started from a shell without the entry installed gets the same `NotAllowed` error, so the script is part of the dev setup, not a packaging afterthought.
 
+Matching the name is not enough: the entry also has to run. Found on 2026-11-22 while wiring the hotkey — `Exec=sotto` with no `sotto` on `PATH` registers as `Could not register app ID: App info not found for 'io.github.atpaawej.Sotto'`, and the very same file with `Exec=/abs/path/to/sotto` registers fine. GIO drops the entry (its desktop lookup ignores one whose command cannot be resolved), so the script now writes an absolute path and refuses to install an entry for a binary that does not exist. Restarting `xdg-desktop-portal` after installing is sometimes needed; the portal otherwise keeps the answer it cached at startup.
+
 The registration is per D-Bus connection, and must happen before the first portal call. Tauri shares one GLib connection for its portal traffic, so the call belongs at startup, in the same process, on that connection.
 
 ## Consequences

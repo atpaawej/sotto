@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": ["deb"],
     "category": "Utility",
     "shortDescription": "Hold a key, speak, and clean text lands where your cursor is.",
     "longDescription": "An open-source dictation app for Linux. Hold a key, speak, release, and the cleaned text is typed into whatever app is focused.",
@@ -39,7 +39,7 @@
     ],
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1"]
+        "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1", "wl-clipboard"]
       }
     }
   }
