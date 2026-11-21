@@ -42,18 +42,24 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
     .shadow(false)
     .focused(false)
     .focusable(false)
-    .visible(true)
+    .visible(false)
     .build()
     .map_err(|error| format!("the pill window could not be created: {error}"))?;
 
-    place(&window);
     #[cfg(target_os = "linux")]
     if let Ok(gtk_win) = window.gtk_window() {
         use gtk::prelude::GtkWindowExt;
         gtk_win.set_accept_focus(false);
         gtk_win.set_focus_on_map(false);
-        gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+        gtk_win.set_skip_taskbar_hint(true);
+        gtk_win.set_skip_pager_hint(true);
+        gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Notification);
     }
+
+    window
+        .show()
+        .map_err(|error| format!("the pill window could not be shown: {error}"))?;
+    place(&window);
     let _ = window.set_always_on_top(true);
     let _ = window.set_visible_on_all_workspaces(true);
     // Keep cursor events enabled so hover tooltips, click-to-dictate, Cancel,
