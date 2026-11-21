@@ -11,9 +11,13 @@ import {
   readDictationState,
   retryKeyboardAccess,
   toggleDictation,
+  updateCleanup,
+  updateDictionary,
   type Access,
   type AppInfo,
   type Attempt,
+  type Cleanup,
+  type CleanupLevel,
   type ConfigSnapshot,
   type DictationState,
 } from "./lib/api";
@@ -114,6 +118,11 @@ export default function App() {
           loaded={loaded}
           access={access}
           refreshAccess={refreshAccess}
+          onSnapshot={(snapshot) =>
+            setLoaded((prev) =>
+              prev.status === "ready" ? { ...prev, snapshot } : prev,
+            )
+          }
         />
       </main>
     </div>
@@ -125,11 +134,13 @@ function Section({
   loaded,
   access,
   refreshAccess,
+  onSnapshot,
 }: {
   id: SectionId;
   loaded: Loaded;
   access: Access | null;
   refreshAccess: () => void;
+  onSnapshot: (snapshot: ConfigSnapshot) => void;
 }) {
   const snapshot = loaded.status === "ready" ? loaded.snapshot : undefined;
   const info = loaded.status === "ready" ? loaded.info : undefined;
@@ -187,52 +198,12 @@ function Section({
 
     case "cleanup":
       return (
-        <section className="section">
-          <h1 className="section-title">Cleanup</h1>
-          <p className="section-deck">
-            Four rules run over every transcript before it is typed. None of them
-            use a language model, so the text can only lose words you did not mean
-            to say.
-          </p>
-          {snapshot && (
-            <dl className="rows">
-              <Rule label="Fillers" on={snapshot.config.cleanup.fillers} />
-              <Rule
-                label="Spoken punctuation"
-                on={snapshot.config.cleanup.spoken_punctuation}
-              />
-              <Rule label="Whitespace" on={snapshot.config.cleanup.whitespace} />
-              <Rule label="Dictionary" on={snapshot.config.cleanup.dictionary} />
-            </dl>
-          )}
-          <p className="empty-note">
-            These states are saved now, but the rulebook is not wired up in this
-            build yet.
-          </p>
-        </section>
+        <CleanupSection snapshot={snapshot} onSnapshot={onSnapshot} />
       );
 
     case "dictionary":
       return (
-        <section className="section">
-          <h1 className="section-title">Dictionary</h1>
-          <p className="section-deck">
-            Names and jargon you want spelled your way. Entries are matched whole
-            and case-insensitively, and never leave your machine.
-          </p>
-          <div className="empty">
-            {snapshot && snapshot.config.dictionary.length > 0 ? (
-              <p className="empty-line">
-                {snapshot.config.dictionary.length} words saved.
-              </p>
-            ) : (
-              <p className="empty-line">No words yet.</p>
-            )}
-            <p className="empty-note">
-              Editing words is not wired up in this build yet.
-            </p>
-          </div>
-        </section>
+        <DictionarySection snapshot={snapshot} onSnapshot={onSnapshot} />
       );
 
     case "history":
@@ -292,8 +263,343 @@ function Row({
   );
 }
 
-function Rule({ label, on }: { label: string; on: boolean }) {
-  return <Row label={label} value={on ? "On" : "Off"} />;
+const CLEANUP_LEVELS: {
+  id: CleanupLevel;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    id: "none",
+    label: "None",
+    hint: "Skips the cleanup call and inserts the raw Whisper transcript.",
+  },
+  {
+    id: "light",
+    label: "Light",
+    hint: "Strips fillers, fixes punctuation, resolves self-corrections, and keeps your exact wording.",
+  },
+  {
+    id: "medium",
+    label: "Medium",
+    hint: "Light cleanup plus light rewording for clarity and conciseness.",
+  },
+];
+
+function CleanupSection({
+  snapshot,
+  onSnapshot,
+}: {
+  snapshot?: ConfigSnapshot;
+  onSnapshot: (snapshot: ConfigSnapshot) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const cleanup = snapshot?.config.cleanup;
+
+  async function save(next: Cleanup) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await updateCleanup(next);
+      onSnapshot(updated);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function setLevel(level: CleanupLevel) {
+    if (!cleanup) return;
+    void save({ ...cleanup, level });
+  }
+
+  function toggleRule(
+    key: "fillers" | "spoken_punctuation" | "whitespace" | "dictionary",
+  ) {
+    if (!cleanup) return;
+    void save({ ...cleanup, [key]: !cleanup[key] });
+  }
+
+  const activeLevel = CLEANUP_LEVELS.find((item) => item.id === cleanup?.level);
+
+  return (
+    <section className="section">
+      <h1 className="section-title">Cleanup</h1>
+      <p className="section-deck">
+        A fast second pass on Groq cleans the raw transcript before it lands at
+        your cursor. If cleanup ever fails, the raw transcript is inserted and
+        the error is shown.
+      </p>
+
+      {error && (
+        <div className="notice" role="alert">
+          <p className="notice-title">Could not save cleanup settings.</p>
+          <p className="notice-detail">{error}</p>
+        </div>
+      )}
+
+      {cleanup ? (
+        <dl className="rows">
+          <div className="row">
+            <dt className="row-label">Level</dt>
+            <dd className="row-value">
+              <div className="segmented" role="group" aria-label="Cleanup level">
+                {CLEANUP_LEVELS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="segmented-button"
+                    aria-pressed={cleanup.level === item.id}
+                    disabled={saving}
+                    onClick={() => setLevel(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              {activeLevel && <p className="row-hint">{activeLevel.hint}</p>}
+            </dd>
+          </div>
+
+          <Row
+            label="Model"
+            value={<span className="mono">{cleanup.model}</span>}
+            hint="Uses your Groq key with reasoning disabled for low latency."
+          />
+
+          <RuleToggle
+            label="Fillers"
+            on={cleanup.fillers}
+            disabled={saving || cleanup.level === "none"}
+            onToggle={() => toggleRule("fillers")}
+          />
+          <RuleToggle
+            label="Spoken punctuation"
+            on={cleanup.spoken_punctuation}
+            disabled={saving || cleanup.level === "none"}
+            onToggle={() => toggleRule("spoken_punctuation")}
+          />
+          <RuleToggle
+            label="Whitespace"
+            on={cleanup.whitespace}
+            disabled={saving || cleanup.level === "none"}
+            onToggle={() => toggleRule("whitespace")}
+          />
+          <RuleToggle
+            label="Dictionary"
+            on={cleanup.dictionary}
+            disabled={saving}
+            onToggle={() => toggleRule("dictionary")}
+          />
+        </dl>
+      ) : (
+        <p className="quiet">Settings are not available.</p>
+      )}
+    </section>
+  );
+}
+
+function RuleToggle({
+  label,
+  on,
+  disabled,
+  onToggle,
+}: {
+  label: string;
+  on: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="row">
+      <dt className="row-label">{label}</dt>
+      <dd className="row-value">
+        <button
+          type="button"
+          className="button button-quiet toggle-button"
+          aria-pressed={on}
+          disabled={disabled}
+          onClick={onToggle}
+        >
+          {on ? "On" : "Off"}
+        </button>
+      </dd>
+    </div>
+  );
+}
+
+function DictionarySection({
+  snapshot,
+  onSnapshot,
+}: {
+  snapshot?: ConfigSnapshot;
+  onSnapshot: (snapshot: ConfigSnapshot) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const entries = snapshot?.config.dictionary ?? [];
+
+  async function save(next: string[]) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await updateDictionary(next);
+      onSnapshot(updated);
+      return true;
+    } catch (err) {
+      setError(String(err));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addEntry(event: React.FormEvent) {
+    event.preventDefault();
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    const ok = await save([...entries, trimmed]);
+    if (ok) setDraft("");
+  }
+
+  async function saveEdit(index: number) {
+    const trimmed = editValue.trim();
+    if (!trimmed) return;
+    const next = entries.map((item, i) => (i === index ? trimmed : item));
+    const ok = await save(next);
+    if (ok) {
+      setEditingIndex(null);
+      setEditValue("");
+    }
+  }
+
+  async function deleteEntry(index: number) {
+    const next = entries.filter((_, i) => i !== index);
+    await save(next);
+    if (editingIndex === index) {
+      setEditingIndex(null);
+      setEditValue("");
+    }
+  }
+
+  return (
+    <section className="section">
+      <h1 className="section-title">Dictionary</h1>
+      <p className="section-deck">
+        Names, jargon, and product terms you want spelled your way. Sent as a
+        hint to Whisper and applied contextually by Cleanup.
+      </p>
+
+      {error && (
+        <div className="notice" role="alert">
+          <p className="notice-title">Could not save dictionary.</p>
+          <p className="notice-detail">{error}</p>
+        </div>
+      )}
+
+      {snapshot ? (
+        <>
+          <form className="dict-form" onSubmit={(e) => void addEntry(e)}>
+            <input
+              type="text"
+              className="text-input"
+              placeholder="Add a word or phrase (e.g. Sotto, Wayland)"
+              value={draft}
+              disabled={saving}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            <button
+              type="submit"
+              className="button"
+              disabled={saving || !draft.trim()}
+            >
+              Add
+            </button>
+          </form>
+
+          {entries.length > 0 ? (
+            <ul className="dict-list">
+              {entries.map((entry, index) => (
+                <li key={`${entry}-${index}`} className="dict-item">
+                  {editingIndex === index ? (
+                    <div className="dict-edit">
+                      <input
+                        type="text"
+                        className="text-input"
+                        value={editValue}
+                        disabled={saving}
+                        onChange={(e) => setEditValue(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={saving || !editValue.trim()}
+                        onClick={() => void saveEdit(index)}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="button button-quiet"
+                        disabled={saving}
+                        onClick={() => {
+                          setEditingIndex(null);
+                          setEditValue("");
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="dict-term">{entry}</span>
+                      <div className="dict-actions">
+                        <button
+                          type="button"
+                          className="button button-quiet"
+                          disabled={saving}
+                          onClick={() => {
+                            setEditingIndex(index);
+                            setEditValue(entry);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="button button-quiet"
+                          disabled={saving}
+                          onClick={() => void deleteEntry(index)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="empty">
+              <p className="empty-line">No words yet.</p>
+              <p className="empty-note">
+                Add names or technical terms above to keep their spelling
+                consistent.
+              </p>
+            </div>
+          )}
+        </>
+      ) : (
+        <p className="quiet">Settings are not available.</p>
+      )}
+    </section>
+  );
 }
 
 function SpeechSection({
@@ -513,22 +819,39 @@ function SpeechSection({
 function Result({ attempt }: { attempt: Attempt }) {
   const { timings } = attempt;
   const recorded = formatElapsed(attempt.durationMs);
+  const shown = attempt.cleaned || attempt.transcript;
+  const rawDiffers =
+    Boolean(attempt.transcript) && attempt.transcript !== shown;
 
   return (
     <div className="result">
       <blockquote className="transcript">
-        {attempt.transcript || "No words came back. Try speaking a little closer."}
+        {shown || "No words came back. Try speaking a little closer."}
       </blockquote>
+      {rawDiffers && (
+        <p className="row-hint">
+          Raw transcript: <span className="mono">{attempt.transcript}</span>
+        </p>
+      )}
       <p className="result-meta">
         {attempt.provider === "groq" ? "Groq" : attempt.provider}{" "}
-        <span className="mono">{attempt.model}</span>, {recorded} of audio, back
-        in {formatMilliseconds(timings.totalMs)}.
+        <span className="mono">{attempt.model}</span>
+        {attempt.cleanupModel && (
+          <>
+            {" + "}
+            <span className="mono">{attempt.cleanupModel}</span>
+          </>
+        )}
+        , {recorded} of audio, back in {formatMilliseconds(timings.totalMs)}.
       </p>
       <p className="timings">
         Stopping {formatMilliseconds(timings.stopMs)}, encoding{" "}
         {formatMilliseconds(timings.encodeMs)}, upload{" "}
         {formatMilliseconds(timings.uploadMs)}, provider{" "}
-        {formatMilliseconds(timings.providerMs)}.
+        {formatMilliseconds(timings.providerMs)}
+        {timings.cleanupMs > 0 &&
+          `, cleanup ${formatMilliseconds(timings.cleanupMs)}`}
+        .
       </p>
     </div>
   );

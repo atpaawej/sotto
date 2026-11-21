@@ -14,6 +14,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE_NAME: &str = "config.json";
+pub const DEFAULT_CLEANUP_MODEL: &str = "qwen/qwen3.8-27b";
 
 /// Bumped when a file written by an older build needs a one-time rewrite.
 /// Version 2 made Groq the default provider, because it is the one wired up.
@@ -60,10 +61,20 @@ pub struct Providers {
     pub groq_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupLevel {
+    None,
+    #[default]
+    Light,
+    Medium,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Cleanup {
-    pub enabled: bool,
+    pub level: CleanupLevel,
+    pub model: String,
     pub fillers: bool,
     pub spoken_punctuation: bool,
     pub whitespace: bool,
@@ -73,13 +84,30 @@ pub struct Cleanup {
 impl Default for Cleanup {
     fn default() -> Self {
         Self {
-            enabled: true,
+            level: CleanupLevel::default(),
+            model: DEFAULT_CLEANUP_MODEL.to_owned(),
             fillers: true,
             spoken_punctuation: true,
             whitespace: true,
             dictionary: true,
         }
     }
+}
+
+/// Trims dictionary entries, drops blanks, and deduplicates case-insensitively.
+pub fn normalize_dictionary(entries: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_lowercase()) {
+            out.push(trimmed.to_owned());
+        }
+    }
+    out
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -392,5 +420,19 @@ mod tests {
 
         assert_eq!(config.trigger_key, "F9");
         assert_eq!(config.cleanup, Cleanup::default());
+        assert_eq!(config.cleanup.level, CleanupLevel::Light);
+        assert_eq!(config.cleanup.model, DEFAULT_CLEANUP_MODEL);
+    }
+
+    #[test]
+    fn normalize_dictionary_trims_drops_blanks_and_dedups_case_insensitively() {
+        let cleaned = normalize_dictionary(vec![
+            "  Sotto ".to_owned(),
+            "".to_owned(),
+            "   ".to_owned(),
+            "sotto".to_owned(),
+            "Wayland".to_owned(),
+        ]);
+        assert_eq!(cleaned, vec!["Sotto".to_owned(), "Wayland".to_owned()]);
     }
 }

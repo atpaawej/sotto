@@ -1,5 +1,7 @@
 # Cleanup is deterministic, not a language model
 
+> **Superseded by [ADR-0011](0011-llm-cleanup.md).**
+
 Between the Transcript and Injection, the text passes through a fixed rulebook: filler removal, whitespace repair, spoken punctuation, and Dictionary corrections. No language model rewrites the text in v1, and there is no "cleanup level" setting — only a master switch and one switch per rule.
 
 ## Why

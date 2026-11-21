@@ -332,18 +332,28 @@ impl Session {
 
         match result {
             Ok(attempt) => {
-                let text = attempt.transcript.trim().to_owned();
+                let text = attempt.cleaned.trim().to_owned();
                 if text.is_empty() {
                     return self.hint("No words came back");
                 }
 
                 match self.ports.injector.inject(&text) {
                     Ok(()) => {
-                        self.last.message = None;
-                        self.last.face = Phase::Done;
-                        self.last.attempt = Some(attempt);
-                        self.show(Some(DONE_VISIBLE));
-                        Vec::new()
+                        if let Some(cleanup_err) = attempt.cleanup_error.clone() {
+                            let message =
+                                format!("Inserted raw transcript; cleanup failed: {cleanup_err}");
+                            self.last.message = Some(message);
+                            self.last.face = Phase::Failed;
+                            self.last.attempt = Some(attempt);
+                            self.show(Some(FAILED_VISIBLE));
+                            vec![Effect::Failed]
+                        } else {
+                            self.last.message = None;
+                            self.last.face = Phase::Done;
+                            self.last.attempt = Some(attempt);
+                            self.show(Some(DONE_VISIBLE));
+                            Vec::new()
+                        }
                     }
                     Err(reason) => {
                         self.last.message = Some(reason.clone());
@@ -482,6 +492,9 @@ mod tests {
     fn attempt(text: &str) -> Attempt {
         Attempt {
             transcript: text.to_owned(),
+            cleaned: text.to_owned(),
+            cleanup_error: None,
+            cleanup_model: None,
             provider: "fake".to_owned(),
             model: "fake".to_owned(),
             duration_ms: 2_000,
@@ -490,6 +503,7 @@ mod tests {
                 encode_ms: 2,
                 upload_ms: 3,
                 provider_ms: 4,
+                cleanup_ms: 0,
                 total_ms: 10,
             },
         }
@@ -518,6 +532,31 @@ mod tests {
 
         assert_eq!(fake.take().injected, vec!["Hello there.".to_owned()]);
         assert_eq!(fake.take().pills.last().expect("a pill").0, Phase::Done);
+    }
+
+    #[test]
+    fn cleanup_failure_injects_raw_transcript_and_surfaces_error() {
+        let fake = Shared::with_capture(2_000, false);
+        let mut session = session(&fake);
+
+        session.handle(Input::Press { at: Instant::now() });
+        session.handle(Input::Release {
+            at: Instant::now() + Duration::from_millis(2_000),
+        });
+
+        let mut att = attempt("um raw whisper text");
+        att.cleanup_error = Some("rate limited".to_owned());
+        let effects = session.handle(Input::Transcript { result: Ok(att) });
+
+        let snapshot = fake.take();
+        assert_eq!(snapshot.injected, vec!["um raw whisper text".to_owned()]);
+        assert_eq!(snapshot.pills.last().expect("a pill").0, Phase::Failed);
+        assert!(matches!(effects.as_slice(), [Effect::Failed]));
+        assert!(session
+            .view()
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("Inserted raw transcript; cleanup failed: rate limited")));
     }
 
     #[test]

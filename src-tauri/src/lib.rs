@@ -5,6 +5,7 @@
 //! turn gestures and Ctrl+V into something the desktop accepts.
 
 mod audio;
+mod cleanup;
 mod config;
 mod dictation;
 mod hotkey;
@@ -21,7 +22,7 @@ use std::{
     time::Instant,
 };
 
-use config::{describe, Config, ConfigStore};
+use config::{describe, normalize_dictionary, Cleanup, Config, ConfigStore};
 use dictation::{Captured, Dictation};
 use portal::SharedAccess;
 use serde::Serialize;
@@ -66,18 +67,19 @@ struct AppInfo {
 /// The microphone, as the session sees it.
 struct Microphone {
     dictation: Dictation,
-    config: Config,
+    loaded: Arc<Mutex<Result<Config, String>>>,
     app: AppHandle,
 }
 
 impl CapturePort for Microphone {
     fn start(&mut self) -> Result<(), String> {
+        let config = current_config(&self.loaded)?;
         let app = self.app.clone();
         let on_level = Arc::new(move |level: f32| {
             let _ = app.emit("dictation://level", level);
         });
         self.dictation
-            .start_with_levels(&self.config, Some(on_level))
+            .start_with_levels(&config, Some(on_level))
             .map_err(|error| describe(&error))
     }
 
@@ -88,22 +90,62 @@ impl CapturePort for Microphone {
     }
 }
 
-#[tauri::command]
-fn config_snapshot(state: State<'_, AppState>) -> Result<ConfigSnapshot, String> {
-    let loaded = state
-        .loaded
+fn current_config(loaded: &Arc<Mutex<Result<Config, String>>>) -> Result<Config, String> {
+    let guard = loaded
         .lock()
         .map_err(|_| "the config state was left locked by a panicking thread".to_owned())?;
+    guard.clone()
+}
 
-    let config = loaded.clone()?;
-
-    let metadata = std::fs::metadata(state.store.path())
+fn snapshot_for(store: &ConfigStore, config: Config) -> Result<ConfigSnapshot, String> {
+    let metadata = std::fs::metadata(store.path())
         .map_err(|error| format!("could not read the config file's permissions: {error}"))?;
 
     Ok(ConfigSnapshot {
-        path: state.store.path().display().to_string(),
+        path: store.path().display().to_string(),
         mode: unix_mode(&metadata),
         config,
+    })
+}
+
+fn mutate_config(
+    state: &State<'_, AppState>,
+    update: impl FnOnce(&mut Config),
+) -> Result<ConfigSnapshot, String> {
+    let mut loaded = state
+        .loaded
+        .lock()
+        .map_err(|_| "the config state was left locked by a panicking thread".to_owned())?;
+    let mut config = loaded.clone()?;
+    update(&mut config);
+    state.store.save(&config).map_err(|error| describe(&error))?;
+    *loaded = Ok(config.clone());
+    snapshot_for(&state.store, config)
+}
+
+#[tauri::command]
+fn config_snapshot(state: State<'_, AppState>) -> Result<ConfigSnapshot, String> {
+    let config = current_config(&state.loaded)?;
+    snapshot_for(&state.store, config)
+}
+
+#[tauri::command]
+fn update_cleanup(
+    state: State<'_, AppState>,
+    cleanup: Cleanup,
+) -> Result<ConfigSnapshot, String> {
+    mutate_config(&state, |config| {
+        config.cleanup = cleanup;
+    })
+}
+
+#[tauri::command]
+fn update_dictionary(
+    state: State<'_, AppState>,
+    dictionary: Vec<String>,
+) -> Result<ConfigSnapshot, String> {
+    mutate_config(&state, |config| {
+        config.dictionary = normalize_dictionary(dictionary);
     })
 }
 
@@ -203,6 +245,8 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             config_snapshot,
+            update_cleanup,
+            update_dictionary,
             app_info,
             dictation_toggle,
             dictation_cancel,
@@ -230,6 +274,7 @@ pub fn run() {
 
             pill::create(app.handle()).map_err(std::io::Error::other)?;
 
+            let loaded_state = Arc::new(Mutex::new(loaded));
             let bridge = inject::bridge(Arc::clone(&access));
             let retry_inject = bridge.retry.clone();
             let view = session::shared_view();
@@ -240,7 +285,7 @@ pub fn run() {
                 inbox_rx,
                 inbox.clone(),
                 view.clone(),
-                config.clone(),
+                Arc::clone(&loaded_state),
                 bridge,
             );
 
@@ -254,7 +299,7 @@ pub fn run() {
 
             app.manage(AppState {
                 store,
-                loaded: Arc::new(Mutex::new(loaded)),
+                loaded: loaded_state,
                 inbox,
                 view,
                 access,
@@ -314,17 +359,23 @@ fn start_session(
     inbox: mpsc::Receiver<Input>,
     effects: mpsc::Sender<Input>,
     view: session::SharedView,
-    config: Config,
+    loaded: Arc<Mutex<Result<Config, String>>>,
     bridge: inject::Bridge,
 ) {
-    let speech = Arc::new(config.clone());
     let session_view = Arc::clone(&view);
+    let shared_cleaner = Arc::new(match cleanup::GroqCleaner::new() {
+        Ok(cleaner) => Some(cleaner),
+        Err(error) => {
+            eprintln!("cleanup client init failed: {}", describe(&error));
+            None
+        }
+    });
 
     thread::spawn(move || {
         let ports = Ports {
             capture: Box::new(Microphone {
                 dictation: Dictation::new(),
-                config,
+                loaded: Arc::clone(&loaded),
                 app: app.clone(),
             }),
             injector: Box::new(bridge.injector),
@@ -343,11 +394,18 @@ fn start_session(
 
             for effect in work {
                 if let Effect::Transcribe { captured } = effect {
-                    let config = Arc::clone(&speech);
+                    let loaded = Arc::clone(&loaded);
+                    let cleaner = Arc::clone(&shared_cleaner);
                     let reply = effects.clone();
                     thread::spawn(move || {
-                        let result = Dictation::transcribe(&config, &captured)
-                            .map_err(|error| describe(&error));
+                        let result = current_config(&loaded).and_then(|config| {
+                            Dictation::transcribe_with_cleaner(
+                                &config,
+                                &captured,
+                                cleaner.as_ref().as_ref().map(|c| c as &dyn cleanup::Cleaner),
+                            )
+                            .map_err(|error| describe(&error))
+                        });
                         let _ = reply.send(Input::Transcript { result });
                     });
                 }

@@ -14,7 +14,8 @@ use serde::Serialize;
 
 use crate::{
     audio::{self, AudioError, Capture, LevelCallback},
-    config::{Config, ProviderId},
+    cleanup::{CleanRequest, Cleaner, GroqCleaner},
+    config::{describe, CleanupLevel, Config, ProviderId},
     transcribe::{Groq, Request, TranscribeError, Transcriber},
 };
 
@@ -29,6 +30,8 @@ pub struct Timings {
     pub upload_ms: u64,
     /// The provider thinking: from the end of the upload to the reply.
     pub provider_ms: u64,
+    /// The second LLM cleanup call (0 when level is `none`).
+    pub cleanup_ms: u64,
     /// Key release to text, measured end to end.
     pub total_ms: u64,
 }
@@ -37,6 +40,9 @@ pub struct Timings {
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     pub transcript: String,
+    pub cleaned: String,
+    pub cleanup_error: Option<String>,
+    pub cleanup_model: Option<String>,
     pub provider: String,
     pub model: String,
     pub duration_ms: u64,
@@ -154,8 +160,23 @@ impl Dictation {
         })
     }
 
-    /// Sends a finished recording to the configured provider.
+    /// Sends a finished recording to the configured provider, then runs LLM cleanup if enabled.
     pub fn transcribe(config: &Config, captured: &Captured) -> Result<Attempt, DictationError> {
+        match GroqCleaner::new() {
+            Ok(cleaner) => Self::transcribe_with_cleaner(config, captured, Some(&cleaner)),
+            Err(err) => {
+                eprintln!("cleanup client init failed: {}", describe(&err));
+                Self::transcribe_with_cleaner(config, captured, None)
+            }
+        }
+    }
+
+    /// Runs transcription and optional cleanup with a reusable [`GroqCleaner`] for connection pooling.
+    pub fn transcribe_with_cleaner(
+        config: &Config,
+        captured: &Captured,
+        cleaner: Option<&dyn Cleaner>,
+    ) -> Result<Attempt, DictationError> {
         let total = Instant::now();
         let Captured {
             wav,
@@ -185,20 +206,36 @@ impl Dictation {
             .clone()
             .ok_or(TranscribeError::MissingKey)?;
 
+        let prompt = if config.cleanup.dictionary {
+            crate::transcribe::dictionary_prompt(&config.dictionary)
+        } else {
+            None
+        };
         let uploaded = Arc::new(Mutex::new(None));
         let sent = Instant::now();
         let transcript = transcriber.transcribe(&Request {
             wav: &wav,
             api_key: &api_key,
             language: None,
+            prompt: prompt.as_deref(),
             uploaded: &uploaded,
         })?;
         let round_trip = sent.elapsed();
         let marked = uploaded.lock().ok().and_then(|mark| *mark);
         let (upload_ms, provider_ms) = split_round_trip(round_trip, marked, sent);
 
+        let (cleaned, cleanup_error, cleanup_model, cleanup_ms) = run_cleanup(
+            config,
+            &api_key,
+            &transcript.text,
+            cleaner,
+        );
+
         Ok(Attempt {
             transcript: transcript.text,
+            cleaned,
+            cleanup_error,
+            cleanup_model,
             provider: provider.to_owned(),
             model,
             duration_ms,
@@ -207,11 +244,87 @@ impl Dictation {
                 encode_ms,
                 upload_ms,
                 provider_ms,
+                cleanup_ms,
                 total_ms: stop_ms + encode_ms + millis(total.elapsed()),
             },
         })
     }
 
+}
+
+fn run_cleanup(
+    config: &Config,
+    api_key: &str,
+    transcript: &str,
+    cleaner: Option<&dyn Cleaner>,
+) -> (String, Option<String>, Option<String>, u64) {
+    if config.cleanup.level == CleanupLevel::None || transcript.trim().is_empty() {
+        return (transcript.to_owned(), None, None, 0);
+    }
+
+    let model = config.cleanup.model.trim();
+    let model = if model.is_empty() {
+        crate::config::DEFAULT_CLEANUP_MODEL
+    } else {
+        model
+    };
+
+    let owned_cleaner;
+    let cleaner_ref: &dyn Cleaner = match cleaner {
+        Some(c) => c,
+        None => match GroqCleaner::new() {
+            Ok(c) => {
+                owned_cleaner = c;
+                &owned_cleaner
+            }
+            Err(err) => {
+                let message = describe(&err);
+                eprintln!("cleanup: {message}");
+                return (
+                    transcript.to_owned(),
+                    Some(message),
+                    Some(model.to_owned()),
+                    0,
+                );
+            }
+        },
+    };
+
+    let empty_dict = Vec::new();
+    let dictionary = if config.cleanup.dictionary {
+        &config.dictionary
+    } else {
+        &empty_dict
+    };
+
+    let started = Instant::now();
+    match cleaner_ref.clean(&CleanRequest {
+        transcript,
+        api_key,
+        model,
+        level: config.cleanup.level,
+        fillers: config.cleanup.fillers,
+        spoken_punctuation: config.cleanup.spoken_punctuation,
+        whitespace: config.cleanup.whitespace,
+        dictionary,
+    }) {
+        Ok(cleaned) => (
+            cleaned,
+            None,
+            Some(model.to_owned()),
+            millis(started.elapsed()),
+        ),
+        Err(err) => {
+            let message = describe(&err);
+            eprintln!("cleanup: {message}");
+            (
+                transcript.to_owned(),
+                Some(message),
+                Some(model.to_owned()),
+                millis(started.elapsed()),
+            )
+        }
+    }
 }
 
 /// Splits a round trip into "sending" and "the provider thinking".
@@ -343,5 +456,45 @@ mod tests {
             .stop_recording()
             .expect_err("nothing to stop");
         assert!(matches!(error, DictationError::NotRecording));
+    }
+
+    struct StubCleaner(Result<String, crate::cleanup::CleanupError>);
+
+    impl Cleaner for StubCleaner {
+        fn clean(&self, _request: &CleanRequest<'_>) -> Result<String, crate::cleanup::CleanupError> {
+            match &self.0 {
+                Ok(text) => Ok(text.clone()),
+                Err(crate::cleanup::CleanupError::RateLimited) => {
+                    Err(crate::cleanup::CleanupError::RateLimited)
+                }
+                Err(_) => Err(crate::cleanup::CleanupError::EmptyReply),
+            }
+        }
+    }
+
+    #[test]
+    fn run_cleanup_skips_when_level_is_none_and_returns_cleaned_when_ok() {
+        let mut config = Config::default();
+        config.cleanup.level = CleanupLevel::None;
+        let stub = StubCleaner(Ok("Should not run".to_owned()));
+        let (cleaned, err, model, _) = run_cleanup(&config, "gsk-test", "um raw text", Some(&stub));
+        assert_eq!(cleaned, "um raw text");
+        assert!(err.is_none());
+        assert!(model.is_none());
+
+        config.cleanup.level = CleanupLevel::Light;
+        let (cleaned, err, model, _) = run_cleanup(&config, "gsk-test", "um raw text", Some(&stub));
+        assert_eq!(cleaned, "Should not run");
+        assert!(err.is_none());
+        assert_eq!(model.as_deref(), Some(crate::config::DEFAULT_CLEANUP_MODEL));
+    }
+
+    #[test]
+    fn run_cleanup_keeps_raw_transcript_and_surfaces_error_on_failure() {
+        let config = Config::default();
+        let failing = StubCleaner(Err(crate::cleanup::CleanupError::RateLimited));
+        let (cleaned, err, _, _) = run_cleanup(&config, "gsk-test", "um raw text", Some(&failing));
+        assert_eq!(cleaned, "um raw text");
+        assert!(err.is_some());
     }
 }
