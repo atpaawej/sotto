@@ -112,20 +112,25 @@ impl SurfacePort for PillSurface {
 /// Bottom centre of the monitor the pill is on. Only X11/Xwayland honours this;
 /// on native Wayland the compositor decides.
 fn place(window: &WebviewWindow) {
-    let Ok(Some(monitor)) = window.current_monitor() else {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
         return;
     };
     let origin = monitor.position();
     let screen = monitor.size();
-    let window_width = window
-        .outer_size()
-        .map(|size| size.width as i32)
-        .unwrap_or(PILL_WIDTH);
+    let scale = monitor.scale_factor();
+    let window_width = (PILL_WIDTH as f64 * scale).round() as i32;
+    let bottom_margin = (BOTTOM_MARGIN as f64 * scale).round() as i32;
+    let margin = (MARGIN as f64 * scale).round() as i32;
     let x = origin.x + (screen.width as i32 - window_width) / 2;
-    let y = origin.y + screen.height as i32 - BOTTOM_MARGIN;
+    let y = origin.y + screen.height as i32 - bottom_margin;
     let _ = window.set_position(PhysicalPosition::new(
-        x.max(origin.x + MARGIN),
-        y.max(origin.y + MARGIN),
+        x.max(origin.x + margin),
+        y.max(origin.y + margin),
     ));
 }
 
