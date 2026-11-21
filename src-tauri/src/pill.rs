@@ -47,10 +47,17 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
     .map_err(|error| format!("the pill window could not be created: {error}"))?;
 
     place(&window);
+    #[cfg(target_os = "linux")]
+    if let Ok(gtk_win) = window.gtk_window() {
+        use gtk::prelude::GtkWindowExt;
+        gtk_win.set_accept_focus(false);
+        gtk_win.set_focus_on_map(false);
+        gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+    }
     let _ = window.set_always_on_top(true);
     let _ = window.set_visible_on_all_workspaces(true);
     // Keep cursor events enabled so hover tooltips, click-to-dictate, Cancel,
-    // and error dismiss work; `.focusable(false)` prevents stealing focus.
+    // and error dismiss work; `accept_focus(false)` prevents stealing focus.
     let _ = window.set_ignore_cursor_events(false);
     Ok(())
 }
