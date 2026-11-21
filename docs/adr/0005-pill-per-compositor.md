@@ -9,6 +9,6 @@ Wayland deliberately denies normal applications two things a floating indicator 
 ## Consequences
 
 - Three implementations, one interface: `show(state)`. The rest of the app never learns which one is running.
-- The Xwayland path is a spike first, not an assumption. It is verified on GNOME 50 before the Shell extension is written; if it fails, the extension is plan B and "no pill" is never a shipped answer.
+- The Xwayland path is a spike first, not an assumption. Verified on GNOME 50.1 on 2026-11-21 (ticket #3): a GTK window under Xwayland landed at exactly the requested coordinates on a 1600x900 screen (asked 640,760, got 640,760), Mutter accepted `_NET_WM_STATE_ABOVE` alongside skip-taskbar and utility type, and the window stayed visible above other apps without taking focus. The Shell extension is not needed for v1.
 - Flatpak (later) must be checked against the Xwayland path, since a sandboxed app spawning an X11 window is a different situation from a native one.
 - When the Pill cannot be shown at all, failures still reach the user through a desktop notification; that is the only place the notification adapter is used.
