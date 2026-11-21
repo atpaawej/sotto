@@ -60,19 +60,61 @@ export interface Attempt {
   timings: Timings;
 }
 
-/** Opens the microphone. Rejects before recording if there is no key. */
-export function startDictation(): Promise<void> {
-  return invoke<void>("dictation_start");
+export type Phase =
+  | "idle"
+  | "listening"
+  | "working"
+  | "done"
+  | "failed"
+  | "hint";
+
+/** What the session is doing, as both the window and the pill render it. */
+export interface DictationState {
+  phase: Phase;
+  /** Dictation stays on until the next press. */
+  locked: boolean;
+  /** Releases never arrived, so the key is a tap rather than a hold. */
+  tapMode: boolean;
+  message: string | null;
+  attempt: Attempt | null;
 }
 
-/** Stops the microphone, transcribes, and returns the text with its timings. */
-export function stopDictation(): Promise<Attempt> {
-  return invoke<Attempt>("dictation_stop");
+export interface Access {
+  hotkey: {
+    bound: boolean;
+    /** What the system actually assigned, e.g. "Ctrl+Alt+Space". */
+    trigger: string | null;
+    problem: string | null;
+  };
+  injection: {
+    ready: boolean;
+    problem: string | null;
+  };
 }
 
-/** True when the backend is still recording, e.g. after a window reload. */
-export function isRecording(): Promise<boolean> {
-  return invoke<boolean>("dictation_recording");
+export const DICTATION_EVENT = "dictation://state";
+
+/** Starts a dictation, or stops the one running. */
+export function toggleDictation(): Promise<void> {
+  return invoke<void>("dictation_toggle");
+}
+
+/** Drops the dictation in progress and injects nothing. */
+export function cancelDictation(): Promise<void> {
+  return invoke<void>("dictation_cancel");
+}
+
+export function readDictationState(): Promise<DictationState> {
+  return invoke<DictationState>("dictation_state");
+}
+
+export function readAccess(): Promise<Access> {
+  return invoke<Access>("access_status");
+}
+
+/** Asks the portal for keyboard access again after a dismissed dialog. */
+export function retryKeyboardAccess(): Promise<void> {
+  return invoke<void>("retry_keyboard_access");
 }
 
 const KEY_NAMES: Record<string, string> = {

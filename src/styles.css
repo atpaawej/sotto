@@ -413,3 +413,157 @@ body {
     animation: none;
   }
 }
+
+/* The pill: a second window, transparent, bottom centre, no chrome at all.
+   It never takes focus, so the app underneath keeps the cursor. */
+
+body.pill-body {
+  background: transparent;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+
+.pill-body #root {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 8px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 344px;
+  padding: 9px 14px;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, #1b1c19 92%, transparent);
+  color: #f1f0eb;
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.28),
+    0 10px 30px rgb(0 0 0 / 0.22);
+  font-size: 0.8125rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  animation: pill-enter 180ms var(--ease-out) both;
+}
+
+@keyframes pill-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+}
+
+.pill-empty {
+  visibility: hidden;
+  animation: none;
+}
+
+.pill-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e4553f;
+  box-shadow: 0 0 0 0 rgb(228 85 63 / 0.5);
+  animation: pill-live 1.8s ease-out infinite;
+}
+
+@keyframes pill-live {
+  0% {
+    box-shadow: 0 0 0 0 rgb(228 85 63 / 0.45);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 7px rgb(228 85 63 / 0);
+  }
+}
+
+.pill-spinner {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid rgb(241 240 235 / 0.28);
+  border-top-color: #f1f0eb;
+  border-radius: 50%;
+  animation: pill-spin 700ms linear infinite;
+}
+
+@keyframes pill-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.pill-check {
+  flex: none;
+  font-size: 0.75rem;
+  color: #9fc49a;
+}
+
+.pill-mark {
+  flex: none;
+  width: 8px;
+  text-align: center;
+  color: #e4553f;
+}
+
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.pill-time {
+  flex: none;
+  color: rgb(241 240 235 / 0.62);
+  font-variant-numeric: tabular-nums;
+}
+
+.pill-cancel {
+  flex: none;
+  margin-left: 2px;
+  padding: 3px 9px;
+  border: 1px solid rgb(241 240 235 / 0.22);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease-out);
+}
+
+.pill-cancel:hover {
+  background: rgb(241 240 235 / 0.12);
+}
+
+.pill-failed {
+  border-color: color-mix(in srgb, #e4553f 45%, transparent);
+}
+
+.button-quiet {
+  margin-top: 10px;
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--ink);
+}
+
+.button-quiet:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--selected) 60%, transparent);
+}
+
+.notice .button-quiet {
+  margin-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill,
+  .pill-dot,
+  .pill-spinner {
+    animation: none;
+  }
+}

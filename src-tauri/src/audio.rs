@@ -30,12 +30,28 @@ pub struct Audio {
     pub sample_rate: u32,
 }
 
+/// Below this peak, a recording is the room rather than a voice. It is about
+/// -44 dBFS: quiet speech reaches it, a muted microphone never does.
+const SILENCE_PEAK: f32 = 0.006;
+
 impl Audio {
     pub fn duration(&self) -> Duration {
         if self.sample_rate == 0 {
             return Duration::ZERO;
         }
         Duration::from_secs_f64(self.samples.len() as f64 / self.sample_rate as f64)
+    }
+
+    /// The loudest sample in the recording, ignoring its sign.
+    pub fn peak(&self) -> f32 {
+        self.samples
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    /// Whether the recording holds nothing worth sending to a provider.
+    pub fn is_silent(&self) -> bool {
+        self.peak() < SILENCE_PEAK
     }
 }
 
@@ -358,6 +374,21 @@ mod tests {
             sample_rate: 16_000,
         };
         assert!(matches!(encode_wav(&nothing), Err(AudioError::Empty)));
+    }
+
+    #[test]
+    fn a_muted_room_is_silent_and_a_voice_is_not() {
+        let room = Audio {
+            samples: vec![0.0005, -0.001, 0.0, 0.002],
+            sample_rate: 16_000,
+        };
+        assert!(room.is_silent());
+
+        let voice = Audio {
+            samples: vec![0.0005, 0.3, -0.2, 0.01],
+            sample_rate: 16_000,
+        };
+        assert!(!voice.is_silent());
     }
 
     #[test]

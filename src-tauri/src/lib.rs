@@ -1,23 +1,34 @@
 //! The Sotto desktop shell.
 //!
-//! The window reads settings, and the Speech section runs one dictation at a
-//! time through [`dictation::Dictation`]. Hotkey and pill arrive in later
-//! tickets; today a button is the only way to start one.
+//! Three layers meet here: the window and the pill render state, the session
+//! thread owns the one dictation that may exist at a time, and the portal tasks
+//! turn gestures and Ctrl+V into something the desktop accepts.
 
 mod audio;
 mod config;
 mod dictation;
+mod hotkey;
+mod inject;
+mod pill;
+mod portal;
+mod session;
 mod transcribe;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::Instant,
+};
 
 use config::{describe, Config, ConfigStore};
-use dictation::{Attempt, Dictation};
+use dictation::{Captured, Dictation};
+use portal::SharedAccess;
 use serde::Serialize;
+use session::{CapturePort, Effect, Input, Ports, Session};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WindowEvent,
+    AppHandle, Emitter, Manager, State, WindowEvent,
 };
 
 struct AppState {
@@ -26,7 +37,13 @@ struct AppState {
     /// state rather than returned from setup so the window can still open and
     /// show the problem (ADR-0001).
     loaded: Arc<Mutex<Result<Config, String>>>,
-    dictation: Arc<Dictation>,
+    /// Every press, release and cancel goes through here, so the window's
+    /// button and the global shortcut obey the same rules.
+    inbox: mpsc::Sender<Input>,
+    view: session::SharedView,
+    access: SharedAccess,
+    /// Asking again for keyboard access after the dialog was dismissed.
+    retry: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 #[derive(Serialize)]
@@ -42,6 +59,26 @@ struct AppInfo {
     version: &'static str,
     license: &'static str,
     repository: &'static str,
+}
+
+/// The microphone, as the session sees it.
+struct Microphone {
+    dictation: Dictation,
+    config: Config,
+}
+
+impl CapturePort for Microphone {
+    fn start(&mut self) -> Result<(), String> {
+        self.dictation
+            .start(&self.config)
+            .map_err(|error| describe(&error))
+    }
+
+    fn stop(&mut self) -> Result<Captured, String> {
+        self.dictation
+            .stop_recording()
+            .map_err(|error| describe(&error))
+    }
 }
 
 #[tauri::command]
@@ -64,41 +101,48 @@ fn config_snapshot(state: State<'_, AppState>) -> Result<ConfigSnapshot, String>
 }
 
 #[tauri::command]
-async fn dictation_start(state: State<'_, AppState>) -> Result<(), String> {
-    let dictation = Arc::clone(&state.dictation);
-    let config = loaded_config(&state)?;
-
-    // Opening the microphone and waiting for it to run blocks, so it never
-    // happens on the thread that paints the window.
-    tauri::async_runtime::spawn_blocking(move || dictation.start(&config))
-        .await
-        .map_err(|error| format!("the microphone task failed: {error}"))?
-        .map_err(|error| describe(&error))
+fn dictation_toggle(state: State<'_, AppState>) -> Result<(), String> {
+    send(&state, Input::Toggle { at: Instant::now() })
 }
 
 #[tauri::command]
-async fn dictation_stop(state: State<'_, AppState>) -> Result<Attempt, String> {
-    let dictation = Arc::clone(&state.dictation);
-    let config = loaded_config(&state)?;
-
-    tauri::async_runtime::spawn_blocking(move || dictation.stop(&config))
-        .await
-        .map_err(|error| format!("the dictation task failed: {error}"))?
-        .map_err(|error| describe(&error))
+fn dictation_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    send(&state, Input::Cancel)
 }
 
 #[tauri::command]
-fn dictation_recording(state: State<'_, AppState>) -> bool {
-    state.dictation.is_recording()
-}
-
-/// The config, or the reason it is unavailable, as a message fit for the window.
-fn loaded_config(state: &State<'_, AppState>) -> Result<Config, String> {
+fn dictation_state(state: State<'_, AppState>) -> session::View {
     state
-        .loaded
+        .view
         .lock()
-        .map_err(|_| "the config state was left locked by a panicking thread".to_owned())?
-        .clone()
+        .map(|view| view.clone())
+        .unwrap_or_else(|_| session::View {
+            phase: session::Phase::Idle,
+            locked: false,
+            tap_mode: false,
+            message: Some("the dictation state was left locked by a panicking thread".to_owned()),
+            attempt: None,
+        })
+}
+
+#[tauri::command]
+fn access_status(state: State<'_, AppState>) -> portal::Access {
+    portal::snapshot(&state.access)
+}
+
+#[tauri::command]
+fn retry_keyboard_access(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .retry
+        .send(())
+        .map_err(|_| "the keyboard bridge is not running".to_owned())
+}
+
+fn send(state: &State<'_, AppState>, input: Input) -> Result<(), String> {
+    state
+        .inbox
+        .send(input)
+        .map_err(|_| "the dictation thread is not running".to_owned())
 }
 
 #[tauri::command]
@@ -144,9 +188,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             config_snapshot,
             app_info,
-            dictation_start,
-            dictation_stop,
-            dictation_recording,
+            dictation_toggle,
+            dictation_cancel,
+            dictation_state,
+            access_status,
+            retry_keyboard_access,
         ])
         .setup(|app| {
             let path = ConfigStore::default_path()
@@ -159,10 +205,49 @@ pub fn run() {
                 message
             });
 
+            // A broken config still opens the window, and the session refuses
+            // to record with a reason rather than guessing at defaults.
+            let config = loaded.clone().unwrap_or_default();
+
+            let access = portal::shared_access();
+            if let Err(problem) = tauri::async_runtime::block_on(portal::register()) {
+                eprintln!("portal: {problem}");
+                portal::update(&access, |state| {
+                    state.hotkey.problem = Some(problem.clone());
+                    state.injection.problem = Some(problem);
+                });
+            }
+
+            pill::create(app.handle()).map_err(std::io::Error::other)?;
+
+            let bridge = inject::bridge(Arc::clone(&access));
+            let retry = bridge.retry.clone();
+            let view = session::shared_view();
+            let (inbox, inbox_rx) = mpsc::channel::<Input>();
+
+            start_session(
+                app.handle().clone(),
+                inbox_rx,
+                inbox.clone(),
+                view.clone(),
+                config.clone(),
+                bridge,
+            );
+
+            let preferred = hotkey::preferred_trigger(&config.trigger_key);
+            tauri::async_runtime::spawn(hotkey::serve(
+                Arc::clone(&access),
+                inbox.clone(),
+                preferred,
+            ));
+
             app.manage(AppState {
                 store,
                 loaded: Arc::new(Mutex::new(loaded)),
-                dictation: Arc::new(Dictation::new()),
+                inbox,
+                view,
+                access,
+                retry,
             });
 
             let open = MenuItem::with_id(app, "open", "Open Sotto", true, None::<&str>)?;
@@ -208,4 +293,52 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to start Sotto");
+}
+
+/// Owns the state machine on its own thread, because stopping the microphone
+/// and waiting for the provider are both blocking.
+fn start_session(
+    app: AppHandle,
+    inbox: mpsc::Receiver<Input>,
+    effects: mpsc::Sender<Input>,
+    view: session::SharedView,
+    config: Config,
+    bridge: inject::Bridge,
+) {
+    let speech = Arc::new(config.clone());
+    let session_view = Arc::clone(&view);
+
+    thread::spawn(move || {
+        let ports = Ports {
+            capture: Box::new(Microphone {
+                dictation: Dictation::new(),
+                config,
+            }),
+            injector: Box::new(bridge.injector),
+            surface: Box::new(pill::PillSurface::new(app.clone())),
+        };
+        let mut session = Session::new(ports);
+        let _ = app.emit("dictation://state", session.view());
+
+        // A second sender for the transcription threads, so a result can arrive
+        // while the loop is doing something else.
+        while let Ok(input) = inbox.recv() {
+            let work = session.handle(input);
+            let current = session.view();
+            session::publish(&session_view, current.clone());
+            let _ = app.emit("dictation://state", &current);
+
+            for effect in work {
+                if let Effect::Transcribe { captured } = effect {
+                    let config = Arc::clone(&speech);
+                    let reply = effects.clone();
+                    thread::spawn(move || {
+                        let result = Dictation::transcribe(&config, &captured)
+                            .map_err(|error| describe(&error));
+                        let _ = reply.send(Input::Transcript { result });
+                    });
+                }
+            }
+        }
+    });
 }
