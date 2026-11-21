@@ -10,6 +10,10 @@ Every failure is handled deliberately or propagated. Never discard one — no `l
 
 Never weaken a test, assertion, or type check to make a failure go away.
 
+### Small atomic commits
+
+Commit work in small, focused, atomic commits — one logical change per commit. Never bundle unrelated changes into a single large commit.
+
 ## Agent skills
 
 ### Issue tracker
