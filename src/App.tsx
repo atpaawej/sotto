@@ -1,10 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  isRecording,
   keyLabel,
   providerLabel,
   readAppInfo,
   readConfig,
+  startDictation,
+  stopDictation,
   type AppInfo,
+  type Attempt,
   type ConfigSnapshot,
 } from "./lib/api";
 
@@ -127,39 +131,7 @@ function Section({ id, loaded }: { id: SectionId; loaded: Loaded }) {
       );
 
     case "speech":
-      return (
-        <section className="section">
-          <h1 className="section-title">Speech</h1>
-          <p className="section-deck">
-            Dictation runs on a provider you bring a key for. ElevenLabs Scribe is
-            the default; Groq is the cheaper second.
-          </p>
-          {snapshot && (
-            <dl className="rows">
-              <Row
-                label="ElevenLabs"
-                value={
-                  <Stored stored={snapshot.config.providers.elevenlabs_key !== null} />
-                }
-                hint="Scribe v3."
-              />
-              <Row
-                label="Groq"
-                value={<Stored stored={snapshot.config.providers.groq_key !== null} />}
-                hint="Whisper large v3 turbo."
-              />
-            </dl>
-          )}
-          {snapshot && (
-            <p className="empty-note">
-              {snapshot.config.providers.elevenlabs_key ||
-              snapshot.config.providers.groq_key
-                ? "Keys are stored in your settings file and sent only to the provider you choose."
-                : "Sotto has nowhere to send your audio until a key is added. Keys go in your settings file and never anywhere else."}
-            </p>
-          )}
-        </section>
-      );
+      return <SpeechSection snapshot={snapshot} />;
 
     case "cleanup":
       return (
@@ -272,6 +244,162 @@ function Rule({ label, on }: { label: string; on: boolean }) {
   return <Row label={label} value={on ? "On" : "Off"} />;
 }
 
-function Stored({ stored }: { stored: boolean }) {
-  return <>{stored ? "Key stored" : "No key yet"}</>;
+type Phase =
+  | { kind: "idle" }
+  | { kind: "starting" }
+  | { kind: "recording"; startedAt: number }
+  | { kind: "working" }
+  | { kind: "done"; attempt: Attempt }
+  | { kind: "failed"; message: string };
+
+function SpeechSection({ snapshot }: { snapshot?: ConfigSnapshot }) {
+  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const [elapsed, setElapsed] = useState(0);
+
+  const hasKey = Boolean(snapshot?.config.providers.groq_key);
+  const recording = phase.kind === "recording";
+  const busy = phase.kind === "starting" || phase.kind === "working";
+
+  // A reloaded window should still know a dictation is running.
+  useEffect(() => {
+    let cancelled = false;
+    isRecording().then(
+      (running) => {
+        if (!cancelled && running) {
+          setPhase({ kind: "recording", startedAt: Date.now() });
+        }
+      },
+      () => {
+        // The window can still start a dictation; this is a best-effort resync.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (phase.kind !== "recording") return;
+    const startedAt = phase.startedAt;
+    const tick = () => setElapsed(Date.now() - startedAt);
+    tick();
+    const id = window.setInterval(tick, 100);
+    return () => window.clearInterval(id);
+  }, [phase]);
+
+  async function toggle() {
+    if (busy) return;
+
+    if (phase.kind === "recording") {
+      setPhase({ kind: "working" });
+      try {
+        const attempt = await stopDictation();
+        setPhase({ kind: "done", attempt });
+      } catch (error) {
+        setPhase({ kind: "failed", message: String(error) });
+      }
+      return;
+    }
+
+    setPhase({ kind: "starting" });
+    try {
+      await startDictation();
+      setPhase({ kind: "recording", startedAt: Date.now() });
+    } catch (error) {
+      setPhase({ kind: "failed", message: String(error) });
+    }
+  }
+
+  const label = recording
+    ? "Stop and transcribe"
+    : phase.kind === "working"
+      ? "Transcribing…"
+      : phase.kind === "starting"
+        ? "Opening the microphone…"
+        : "Start dictation";
+
+  return (
+    <section className="section">
+      <h1 className="section-title">Speech</h1>
+      <p className="section-deck">
+        Groq transcribes every dictation with Whisper large v3 turbo, using the
+        key in your settings file. The hotkey arrives in a later build, so this
+        button is how you dictate for now.
+      </p>
+
+      <div className="dictation">
+        <button
+          className={recording ? "button button-live" : "button"}
+          type="button"
+          onClick={toggle}
+          disabled={!hasKey || busy}
+        >
+          {recording && <span className="recording-dot" aria-hidden="true" />}
+          {label}
+        </button>
+        {recording && (
+          <span className="timer" role="timer" aria-live="off">
+            {formatElapsed(elapsed)}
+          </span>
+        )}
+      </div>
+
+      <p className="dictation-hint" aria-live="polite">
+        {!hasKey ? (
+          <>
+            Add a Groq key to <span className="mono">{snapshot?.path}</span> to
+            dictate. Keys never leave this machine except to the provider.
+          </>
+        ) : recording ? (
+          "Recording. Press stop when you have finished."
+        ) : (
+          "Speak naturally. The audio is deleted as soon as the text comes back."
+        )}
+      </p>
+
+      {phase.kind === "failed" && (
+        <div className="notice" role="alert">
+          <p className="notice-title">That dictation did not go through.</p>
+          <p className="notice-detail">{phase.message}</p>
+        </div>
+      )}
+
+      {phase.kind === "done" && <Result attempt={phase.attempt} />}
+    </section>
+  );
+}
+
+function Result({ attempt }: { attempt: Attempt }) {
+  const { timings } = attempt;
+  const recorded = formatElapsed(attempt.durationMs);
+
+  return (
+    <div className="result">
+      <blockquote className="transcript">
+        {attempt.transcript || "No words came back. Try speaking a little closer."}
+      </blockquote>
+      <p className="result-meta">
+        {attempt.provider === "groq" ? "Groq" : attempt.provider}{" "}
+        <span className="mono">{attempt.model}</span>, {recorded} of audio, back
+        in {formatMilliseconds(timings.totalMs)}.
+      </p>
+      <p className="timings">
+        Stopping {formatMilliseconds(timings.stopMs)}, encoding{" "}
+        {formatMilliseconds(timings.encodeMs)}, upload{" "}
+        {formatMilliseconds(timings.uploadMs)}, provider{" "}
+        {formatMilliseconds(timings.providerMs)}.
+      </p>
+    </div>
+  );
+}
+
+/** 3400 → "3.4 s", 12400 → "12.4 s" */
+function formatElapsed(milliseconds: number): string {
+  return `${(milliseconds / 1000).toFixed(1)} s`;
+}
+
+function formatMilliseconds(milliseconds: number): string {
+  return milliseconds < 1000
+    ? `${Math.round(milliseconds)} ms`
+    : `${(milliseconds / 1000).toFixed(2)} s`;
 }

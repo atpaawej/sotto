@@ -44,6 +44,37 @@ export function readAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("app_info");
 }
 
+export interface Timings {
+  stopMs: number;
+  encodeMs: number;
+  uploadMs: number;
+  providerMs: number;
+  totalMs: number;
+}
+
+export interface Attempt {
+  transcript: string;
+  provider: string;
+  model: string;
+  durationMs: number;
+  timings: Timings;
+}
+
+/** Opens the microphone. Rejects before recording if there is no key. */
+export function startDictation(): Promise<void> {
+  return invoke<void>("dictation_start");
+}
+
+/** Stops the microphone, transcribes, and returns the text with its timings. */
+export function stopDictation(): Promise<Attempt> {
+  return invoke<Attempt>("dictation_stop");
+}
+
+/** True when the backend is still recording, e.g. after a window reload. */
+export function isRecording(): Promise<boolean> {
+  return invoke<boolean>("dictation_recording");
+}
+
 const KEY_NAMES: Record<string, string> = {
   ControlRight: "Right Ctrl",
   ControlLeft: "Left Ctrl",
