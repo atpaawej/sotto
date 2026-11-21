@@ -185,12 +185,18 @@ impl Dictation {
             .clone()
             .ok_or(TranscribeError::MissingKey)?;
 
+        let prompt = if config.cleanup.dictionary {
+            crate::transcribe::dictionary_prompt(&config.dictionary)
+        } else {
+            None
+        };
         let uploaded = Arc::new(Mutex::new(None));
         let sent = Instant::now();
         let transcript = transcriber.transcribe(&Request {
             wav: &wav,
             api_key: &api_key,
             language: None,
+            prompt: prompt.as_deref(),
             uploaded: &uploaded,
         })?;
         let round_trip = sent.elapsed();

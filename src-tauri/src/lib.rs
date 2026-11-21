@@ -5,6 +5,7 @@
 //! turn gestures and Ctrl+V into something the desktop accepts.
 
 mod audio;
+mod cleanup;
 mod config;
 mod dictation;
 mod hotkey;

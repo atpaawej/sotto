@@ -20,9 +20,25 @@ pub struct Request<'a> {
     pub api_key: &'a str,
     /// ISO-639-1 hint; providers auto-detect when this is `None`.
     pub language: Option<&'a str>,
+    /// Optional vocabulary/spelling hint passed to Whisper's `prompt` field.
+    pub prompt: Option<&'a str>,
     /// Set to the moment the request body is fully written, so the caller can
     /// separate upload time from provider time.
     pub uploaded: &'a Arc<Mutex<Option<Instant>>>,
+}
+
+/// Formats dictionary terms as a Whisper `prompt` hint, or `None` when empty.
+pub fn dictionary_prompt(dictionary: &[String]) -> Option<String> {
+    let terms: Vec<&str> = dictionary
+        .iter()
+        .map(|term| term.trim())
+        .filter(|term| !term.is_empty())
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +122,9 @@ impl Groq {
 
         if let Some(language) = request.language {
             form = form.text("language", language.to_owned());
+        }
+        if let Some(prompt) = request.prompt {
+            form = form.text("prompt", prompt.to_owned());
         }
 
         Ok(form)
@@ -248,6 +267,7 @@ mod tests {
             wav: &wav,
             api_key: key,
             language: Some("en"),
+            prompt: None,
             uploaded: &uploaded,
         })
     }
@@ -329,8 +349,34 @@ mod tests {
             wav: &wav,
             api_key: "   ",
             language: None,
+            prompt: None,
             uploaded: &uploaded,
         });
         assert!(matches!(result, Err(TranscribeError::MissingKey)));
+    }
+
+    #[test]
+    fn dictionary_prompt_is_forwarded_to_whisper_when_present() {
+        let (endpoint, captured, handle) = mock(200, r#"{"text":"Sotto on Wayland"}"#);
+        let wav = b"RIFFmock".to_vec();
+        let uploaded = Arc::new(Mutex::new(None));
+        let prompt = dictionary_prompt(&["Sotto".to_owned(), " ".to_owned(), "Wayland".to_owned()]);
+        assert_eq!(prompt.as_deref(), Some("Sotto, Wayland"));
+
+        Groq::at(&endpoint)
+            .transcribe(&Request {
+                wav: &wav,
+                api_key: "gsk-test",
+                language: None,
+                prompt: prompt.as_deref(),
+                uploaded: &uploaded,
+            })
+            .expect("transcribe");
+        let request = captured.recv().expect("request");
+        handle.join().expect("mock thread");
+
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("name=\"prompt\""));
+        assert!(body.contains("Sotto, Wayland"));
     }
 }
