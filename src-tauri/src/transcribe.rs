@@ -397,12 +397,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         let handle = std::thread::spawn(move || {
-            let Ok(mut request) = server.recv() else {
-                return;
-            };
+            let mut request = server.recv().expect("the mock server gets a request");
 
             let mut body = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut body);
+            request
+                .as_reader()
+                .read_to_end(&mut body)
+                .expect("read the mock request body");
 
             let headers: Vec<(String, String)> = request
                 .headers()
@@ -416,16 +417,17 @@ mod tests {
                     .map(|(_, value)| value.clone())
             };
 
-            let _ = tx.send(Captured {
+            tx.send(Captured {
                 path: request.url().to_owned(),
                 authorization: header("authorization"),
                 api_key: header("xi-api-key"),
                 content_type: header("content-type"),
                 body,
-            });
+            })
+            .expect("the caller is still waiting for the captured request");
 
             let response = tiny_http::Response::from_string(reply).with_status_code(status);
-            let _ = request.respond(response);
+            request.respond(response).expect("answer the mock request");
         });
 
         (
