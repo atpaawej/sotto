@@ -3,7 +3,7 @@
 #
 # The app ships as a `.deb`, so installing or updating it needs sudo:
 #
-#   curl -fsSL https://raw.githubusercontent.com/atpaawej/typeless/main/scripts/install-sotto.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/atpaawej/typeless/master/scripts/install-sotto.sh | sudo bash
 #
 # The `.deb` is downloaded from the release, its SHA-256 is verified against
 # the checksum the release ships next to it, and dpkg installs it. The
