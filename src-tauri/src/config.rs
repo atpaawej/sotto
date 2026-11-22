@@ -54,11 +54,54 @@ pub enum ProviderId {
     Groq,
 }
 
+impl ProviderId {
+    /// The name used in config, in History rows and on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderId::ElevenLabs => "eleven_labs",
+            ProviderId::Groq => "groq",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "eleven_labs" => Some(ProviderId::ElevenLabs),
+            "groq" => Some(ProviderId::Groq),
+            _ => None,
+        }
+    }
+
+    /// Only two providers ship, so the other one is unambiguous.
+    pub fn other(self) -> Self {
+        match self {
+            ProviderId::Groq => ProviderId::ElevenLabs,
+            ProviderId::ElevenLabs => ProviderId::Groq,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Providers {
     pub elevenlabs_key: Option<String>,
     pub groq_key: Option<String>,
+}
+
+impl Providers {
+    /// Both keys live in the same file; choosing a provider never erases one.
+    pub fn key(&self, provider: ProviderId) -> Option<&String> {
+        match provider {
+            ProviderId::Groq => self.groq_key.as_ref(),
+            ProviderId::ElevenLabs => self.elevenlabs_key.as_ref(),
+        }
+    }
+
+    pub fn set_key(&mut self, provider: ProviderId, key: Option<String>) {
+        match provider {
+            ProviderId::Groq => self.groq_key = key,
+            ProviderId::ElevenLabs => self.elevenlabs_key = key,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,5 +477,32 @@ mod tests {
             "Wayland".to_owned(),
         ]);
         assert_eq!(cleaned, vec!["Sotto".to_owned(), "Wayland".to_owned()]);
+    }
+
+    #[test]
+    fn provider_ids_round_trip_through_their_stored_names() {
+        for provider in [ProviderId::Groq, ProviderId::ElevenLabs] {
+            assert_eq!(ProviderId::parse(provider.as_str()), Some(provider));
+        }
+        assert_eq!(ProviderId::parse("not_a_provider"), None);
+        assert_eq!(ProviderId::Groq.other(), ProviderId::ElevenLabs);
+        assert_eq!(ProviderId::ElevenLabs.other(), ProviderId::Groq);
+    }
+
+    #[test]
+    fn saving_one_key_leaves_the_other_alone() {
+        let mut providers = Providers::default();
+        providers.set_key(ProviderId::Groq, Some("gsk-test".to_owned()));
+        providers.set_key(ProviderId::ElevenLabs, Some("xi-test".to_owned()));
+
+        assert_eq!(providers.key(ProviderId::Groq).map(String::as_str), Some("gsk-test"));
+        assert_eq!(
+            providers.key(ProviderId::ElevenLabs).map(String::as_str),
+            Some("xi-test")
+        );
+
+        providers.set_key(ProviderId::Groq, None);
+        assert!(providers.key(ProviderId::Groq).is_none());
+        assert_eq!(providers.elevenlabs_key.as_deref(), Some("xi-test"));
     }
 }
