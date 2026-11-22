@@ -39,6 +39,7 @@
     ],
     "linux": {
       "deb": {
+        "desktopTemplate": "../packaging/Sotto-hidden.desktop",
         "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1", "wl-clipboard"],
         "files": {
           "usr/share/applications/io.github.atpaawej.Sotto.desktop": "../packaging/io.github.atpaawej.Sotto.desktop",
