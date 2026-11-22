@@ -209,16 +209,19 @@ fn test_provider(state: State<'_, AppState>, provider: ProviderId) -> Result<(),
 /// Saves the shortcut and makes the listener use it at once, without leaving
 /// the previous key bound.
 #[tauri::command]
-fn update_trigger_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
+fn update_trigger_key(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<ConfigSnapshot, String> {
     let key = key.trim().to_owned();
     hotkey::key_from_name(&key)?;
-    mutate_config(&state, |config| {
+    let snapshot = mutate_config(&state, |config| {
         config.trigger_key = key.clone();
     })?;
     portal::update(&state.access, |access| {
         access.hotkey.trigger = Some(key);
     });
-    Ok(())
+    Ok(snapshot)
 }
 
 #[tauri::command]
