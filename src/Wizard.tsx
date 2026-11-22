@@ -63,6 +63,19 @@ export default function Wizard({
 
   const provider = current.config.active_provider;
   const trigger = access?.hotkey.trigger ?? keyLabel(current.config.trigger_key);
+  const phase = dictation?.phase ?? "idle";
+  const recording = phase === "listening";
+  const working = phase === "working";
+  const shown = dictation?.attempt
+    ? dictation.attempt.cleaned || dictation.attempt.transcript
+    : "";
+  // Text is injected before a cleanup warning is attached. A blocked injection
+  // is the only failed phase that carries a retry id, so this is the proof that
+  // the whole loop works — even when cleanup had no Groq key to run on.
+  const inserted =
+    (phase === "done" || phase === "failed") &&
+    Boolean(shown.trim()) &&
+    !dictation?.retryId;
 
   function apply(snapshot: ConfigSnapshot) {
     setCurrent(snapshot);
@@ -124,13 +137,17 @@ export default function Wizard({
 
     return () => {
       cancelled = true;
-      void unlisten.then((stop) => stop());
+      void unlisten.then(
+        (stop) => stop(),
+        (error: unknown) =>
+          console.error("could not stop the dictation listener", error),
+      );
     };
   }, []);
 
   useEffect(() => {
-    if (dictation?.phase === "done") setDictationDone(true);
-  }, [dictation?.phase]);
+    if (inserted) setDictationDone(true);
+  }, [inserted]);
 
   async function changeTrigger(next: string) {
     setTriggerSaving(true);
@@ -155,13 +172,6 @@ export default function Wizard({
       setBusy(false);
     }
   }
-
-  const phase = dictation?.phase ?? "idle";
-  const recording = phase === "listening";
-  const working = phase === "working";
-  const shown = dictation?.attempt
-    ? dictation.attempt.cleaned || dictation.attempt.transcript
-    : "";
 
   return (
     <div className="wizard" key={step}>
@@ -351,7 +361,9 @@ export default function Wizard({
             </div>
           )}
 
-          {phase === "failed" && (dictation?.failure || dictation?.message) && (
+          {phase === "failed" &&
+            !inserted &&
+            (dictation?.failure || dictation?.message) && (
             <div className="notice wizard-notice" role="alert">
               <p className="notice-title">
                 {dictation?.failure?.reason ?? "That dictation did not go through."}
@@ -374,6 +386,11 @@ export default function Wizard({
                 <span className="wizard-check" aria-hidden="true">✓</span>
                 That dictation landed. The loop is proven.
               </p>
+              {inserted && dictation?.failure && (
+                <p className="wizard-note">
+                  {dictation.failure.reason} — {dictation.failure.detail}
+                </p>
+              )}
             </div>
           )}
           {triggerError && <p className="wizard-error">{triggerError}</p>}
