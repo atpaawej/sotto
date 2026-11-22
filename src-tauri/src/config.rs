@@ -17,8 +17,12 @@ pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const DEFAULT_CLEANUP_MODEL: &str = "qwen/qwen3.8-27b";
 
 /// Bumped when a file written by an older build needs a one-time rewrite.
-/// Version 2 made Groq the default provider, because it is the one wired up.
-const CURRENT_VERSION: u32 = 2;
+/// Version 3 added `text_injectors`, the ordered TextInjector list (ADR-0004).
+const CURRENT_VERSION: u32 = 3;
+
+/// The default injector order: the clipboard path leads, and ydotool is the
+/// documented-never-required fallback (ADR-0004).
+pub const DEFAULT_TEXT_INJECTORS: [&str; 2] = ["clipboard", "ydotool"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +34,9 @@ pub struct Config {
     pub cleanup: Cleanup,
     pub dictionary: Vec<String>,
     pub retention_days: Option<u32>,
+    /// The injectors the clipboard path and ydotool are tried in, in order
+    /// (ADR-0004: ordering is data, not code).
+    pub text_injectors: Vec<String>,
 }
 
 impl Default for Config {
@@ -42,6 +49,10 @@ impl Default for Config {
             cleanup: Cleanup::default(),
             dictionary: Vec::new(),
             retention_days: None,
+            text_injectors: DEFAULT_TEXT_INJECTORS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
         }
     }
 }
@@ -435,6 +446,43 @@ mod tests {
 
         assert_eq!(config.active_provider, ProviderId::ElevenLabs);
         assert_eq!(config.providers.elevenlabs_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn a_version_two_file_gains_the_ordered_injectors_default() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("mkdir");
+        fs::write(store.path(), r#"{"version":2,"trigger_key":"F9"}"#).expect("write v2 config");
+
+        let config = store.load_or_init().expect("migrate");
+
+        assert_eq!(
+            config.text_injectors,
+            vec!["clipboard".to_owned(), "ydotool".to_owned()],
+            "a file from before the field got the default order"
+        );
+        assert_eq!(config.version, 3);
+        assert_eq!(
+            store.load().expect("reload").text_injectors,
+            config.text_injectors,
+            "the migrated order is written back"
+        );
+    }
+
+    #[test]
+    fn the_default_order_leads_with_the_clipboard_path() {
+        assert_eq!(
+            DEFAULT_TEXT_INJECTORS,
+            ["clipboard", "ydotool"],
+            "the clipboard path leads; ydotool is the optional fallback"
+        );
+        assert_eq!(
+            Config::default().text_injectors,
+            DEFAULT_TEXT_INJECTORS
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

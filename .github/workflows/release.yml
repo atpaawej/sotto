@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm ci
+      # A tag builds both an AppImage and a .deb.
+      - run: npm run tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles
+          path: src-tauri/target/release/bundle
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundles
+          path: bundles
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          find bundles -type f \( -name "*.deb" -o -name "*.AppImage" \) -exec cp {} release/ \;
+          (
+            cd release
+            for deb in *.deb; do
+              [ -e "$deb" ] && sha256sum "$deb" > "$deb.sha256"
+            done
+          )
+          ls release
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" --generate-notes release/*
+          fi

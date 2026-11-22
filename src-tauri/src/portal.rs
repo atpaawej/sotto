@@ -28,6 +28,10 @@ pub struct Injection {
     /// A virtual keyboard is open on `/dev/uinput`, so Ctrl+V can be pressed.
     pub ready: bool,
     pub problem: Option<String>,
+    /// The TextInjector adapter the bridge will use, per ADR-0004.
+    pub active: String,
+    /// Why `active` is the adapter that injects.
+    pub reason: String,
 }
 
 pub type SharedAccess = Arc<Mutex<Access>>;

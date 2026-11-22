@@ -16,7 +16,9 @@ mod keyboard;
 mod pill;
 mod portal;
 mod session;
+mod startup;
 mod transcribe;
+mod update;
 
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -338,6 +340,31 @@ fn access_status(state: State<'_, AppState>) -> portal::Access {
 }
 
 #[tauri::command]
+fn start_at_login_enabled() -> bool {
+    startup::is_start_at_login_enabled()
+}
+
+#[tauri::command]
+fn set_start_at_login(enabled: bool) -> Result<(), String> {
+    startup::set_start_at_login(enabled)
+}
+
+/// Asks GitHub for the newest release and reports whether it is newer than
+/// the running version.
+#[tauri::command]
+fn check_for_updates() -> Result<update::UpdateStatus, String> {
+    update::check(env!("CARGO_PKG_VERSION"))
+}
+
+/// Downloads the newest `.deb`, verifies its checksum and installs it with
+/// sudo. The running app keeps going; the user restarts it to use the new
+/// version.
+#[tauri::command]
+fn install_update() -> Result<(), String> {
+    update::install_latest()
+}
+
+#[tauri::command]
 fn retry_keyboard_access(state: State<'_, AppState>) -> Result<(), String> {
     state
         .retry_inject
@@ -424,6 +451,10 @@ pub fn run() {
             update_retention,
             access_status,
             retry_keyboard_access,
+            start_at_login_enabled,
+            set_start_at_login,
+            check_for_updates,
+            install_update,
             open_main_window,
         ])
         .setup(|app| {
@@ -455,7 +486,11 @@ pub fn run() {
             }
 
             let (inbox, inbox_rx) = mpsc::channel::<Input>();
-            let bridge = inject::bridge(Arc::clone(&access), inbox.clone());
+            let bridge = inject::bridge(
+                Arc::clone(&access),
+                inbox.clone(),
+                config.text_injectors.clone(),
+            );
             let retry_inject = bridge.retry.clone();
             let copy = bridge.copy.clone();
             let view = session::shared_view();

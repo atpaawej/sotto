@@ -169,6 +169,10 @@ export interface Access {
   injection: {
     ready: boolean;
     problem: string | null;
+    /** The TextInjector adapter the bridge will use, per the Rust side. */
+    active: string;
+    /** Why the active adapter is the one that injects. */
+    reason: string;
   };
 }
 
@@ -231,6 +235,44 @@ export function readDictationState(): Promise<DictationState> {
 
 export function readAccess(): Promise<Access> {
   return invoke<Access>("access_status");
+}
+
+export interface UpdateStatus {
+  /** The running version. */
+  current: string;
+  /** The newest published version, when the check succeeded. */
+  latest: string | null;
+  /** True when `latest` is newer than `current`. */
+  available: boolean;
+  /** The release page URL. */
+  url: string | null;
+}
+
+/** Asks GitHub for the newest release and reports whether it is newer. */
+export function checkForUpdates(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("check_for_updates");
+}
+
+/**
+ * Downloads the newest `.deb`, verifies its SHA-256 and installs it with
+ * sudo. The app restarts the next time it is started.
+ */
+export function installUpdate(): Promise<void> {
+  return invoke<void>("install_update");
+}
+
+/** Whether the XDG autostart entry is present. */
+export function startAtLoginEnabled(): Promise<boolean> {
+  return invoke<boolean>("start_at_login_enabled");
+}
+
+export function setStartAtLogin(enabled: boolean): Promise<void> {
+  return invoke<void>("set_start_at_login", { enabled });
+}
+
+/** The names Settings shows for the TextInjector adapters (Rust: inject.rs). */
+export function injectorLabel(id: string): string {
+  return id === "ydotool" ? "ydotool" : id;
 }
 
 /** Asks the portal for keyboard access again after a dismissed dialog. */

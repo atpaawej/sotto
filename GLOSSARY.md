@@ -28,6 +28,18 @@ _Avoid_: vocabulary, glossary
 Putting the finished text into the app that had focus when the dictation started.
 _Avoid_: paste, typing (both are ways to inject, not the act itself)
 
+**Injector**:
+The adapter that delivers finished text to the focused app. The clipboard path (write the clipboard, tap Ctrl+V) leads, and ydotool is the optional fallback. Settings names the active one and why it was chosen.
+_Avoid_: paster
+
+**Start at login**:
+The app opens when you log in. The state lives in the user's autostart file.
+_Avoid_: autostart
+
+**Updates**:
+Newer releases of the app, reported without installing. Installing is one click in Settings → About, or the installer script.
+_Avoid_: upgrade
+
 **Pill**:
 The small always-on-top window that shows listening, working, and done.
 _Avoid_: overlay, HUD, widget
