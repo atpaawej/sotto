@@ -183,6 +183,42 @@ export interface HistoryEntry {
   injection: InjectionOutcome;
   failure: Failure | null;
   recordingPath: string;
+  timings: Timings | null;
+}
+
+export type InsightsRange = "7d" | "30d" | "all";
+
+export interface DailyActivity {
+  date: string;
+  count: number;
+  words: number;
+}
+
+export interface ProviderInsight {
+  provider: string;
+  count: number;
+  avgTotalMs: number | null;
+  avgProviderMs: number | null;
+  avgEncodeMs: number | null;
+  avgUploadMs: number | null;
+  avgCleanupMs: number | null;
+}
+
+export interface InsightsSnapshot {
+  totalDictations: number;
+  insertedCount: number;
+  blockedCount: number;
+  failedCount: number;
+  totalWords: number;
+  rawWords: number;
+  wordsTrimmed: number;
+  totalSpeakingMs: number;
+  avgWpm: number;
+  estimatedTimeSavedMs: number;
+  currentStreakDays: number;
+  longestStreakDays: number;
+  dailyActivity: DailyActivity[];
+  byProvider: ProviderInsight[];
 }
 
 export interface Access {
@@ -222,6 +258,13 @@ export function retryDictation(): Promise<void> {
 /** Newest first. An empty query lists everything. */
 export function readHistory(query = ""): Promise<HistoryEntry[]> {
   return invoke<HistoryEntry[]>("history_list", { query });
+}
+
+export function readInsights(range: InsightsRange): Promise<InsightsSnapshot> {
+  return invoke<InsightsSnapshot>("history_insights", {
+    range,
+    tzOffsetMinutes: new Date().getTimezoneOffset(),
+  });
 }
 
 export function retryHistory(id: string): Promise<void> {
@@ -319,9 +362,25 @@ const KEY_NAMES: Record<string, string> = {
   ShiftRight: "Right Shift",
   ShiftLeft: "Left Shift",
   SuperRight: "Right Super",
+  MetaRight: "Right Super",
   SuperLeft: "Left Super",
+  MetaLeft: "Left Super",
   CapsLock: "Caps Lock",
   Space: "Space",
+  Tab: "Tab",
+  Enter: "Enter",
+  Backspace: "Backspace",
+  Backquote: "`",
+  Minus: "-",
+  Equal: "=",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Backslash: "\\",
+  Semicolon: ";",
+  Quote: "'",
+  Comma: ",",
+  Period: ".",
+  Slash: "/",
   F1: "F1",
   F2: "F2",
   F3: "F3",
@@ -336,8 +395,34 @@ const KEY_NAMES: Record<string, string> = {
   F12: "F12",
 };
 
+function singleKeyLabel(key: string): string {
+  const trimmed = key.trim();
+  if (KEY_NAMES[trimmed]) return KEY_NAMES[trimmed];
+  if (trimmed.startsWith("Key") && trimmed.length === 4) {
+    return trimmed.slice(3).toUpperCase();
+  }
+  if (trimmed.startsWith("Digit") && trimmed.length === 6) {
+    return trimmed.slice(5);
+  }
+  return trimmed;
+}
+
 export function keyLabel(key: string): string {
-  return KEY_NAMES[key] ?? key;
+  return key
+    .split("+")
+    .map(singleKeyLabel)
+    .filter(Boolean)
+    .join(" + ");
+}
+
+/** Normalizes a DOM KeyboardEvent.code into a backend-accepted key name, or null if unsupported. */
+export function normalizeShortcutCode(code: string): string | null {
+  if (code === "MetaLeft") return "SuperLeft";
+  if (code === "MetaRight") return "SuperRight";
+  if (code in KEY_NAMES) return code;
+  if (/^Key[A-Z]$/.test(code)) return code;
+  if (/^Digit[0-9]$/.test(code)) return code;
+  return null;
 }
 
 export function providerLabel(provider: string): string {
