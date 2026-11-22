@@ -8,6 +8,7 @@ mod audio;
 mod cleanup;
 mod config;
 mod dictation;
+mod failure;
 mod hotkey;
 mod inject;
 mod keyboard;
