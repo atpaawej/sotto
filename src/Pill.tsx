@@ -18,7 +18,6 @@ import {
 } from "./lib/api";
 
 const BAR_WEIGHTS = [0.42, 0.7, 0.92, 1.0, 0.92, 0.7, 0.42];
-const IDLE_BARS = [6, 10, 13, 10, 6];
 const EASE_OUT = [0.23, 1, 0.32, 1] as const;
 
 /**
@@ -222,29 +221,13 @@ export default function Pill() {
             {isIdle && (
               <motion.div
                 key="idle-rest"
-                className="pill-row pill-idle-row"
-                initial={{ opacity: 0, scale: 0.96 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
-                transition={{ duration: 0.13, ease: EASE_OUT }}
+                className="pill-idle-inner"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.12, ease: EASE_OUT }}
               >
-                <span
-                  className={
-                    hovered
-                      ? "pill-idle-dot pill-idle-dot-active"
-                      : "pill-idle-dot"
-                  }
-                  aria-hidden="true"
-                />
-                <span className="pill-idle-bars" aria-hidden="true">
-                  {IDLE_BARS.map((height, index) => (
-                    <span
-                      key={index}
-                      className="pill-idle-glyph"
-                      style={{ height: `${height}px` }}
-                    />
-                  ))}
-                </span>
+                <span className="pill-idle-grip" aria-hidden="true" />
               </motion.div>
             )}
 
