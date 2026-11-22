@@ -32,6 +32,10 @@ _Avoid_: paste, typing (both are ways to inject, not the act itself)
 The small always-on-top window that shows listening, working, and done.
 _Avoid_: overlay, HUD, widget
 
+**Provider**:
+The speech service that transcribes a Recording with your key. Sotto keeps a key for each provider and sends audio only to the active one.
+_Avoid_: engine, backend
+
 **History**:
 Every Dictation, newest first, with its Transcript, cleaned text, outcome, and Recording.
 _Avoid_: log, archive, feed
