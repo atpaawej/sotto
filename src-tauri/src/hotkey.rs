@@ -12,7 +12,7 @@ use std::{
 };
 
 use evdev::{Device, EventSummary, EventType, KeyCode};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::{
     config::Config,
@@ -61,10 +61,11 @@ pub async fn serve(
     loaded: Arc<Mutex<Result<Config, String>>>,
     mut retries: UnboundedReceiver<()>,
 ) {
+    let (exited_tx, mut exited_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut bound = false;
     loop {
         if !bound {
-            match bind_keyboards(&access, &inbox, Arc::clone(&loaded)) {
+            match bind_keyboards(&access, &inbox, Arc::clone(&loaded), exited_tx.clone()) {
                 Ok(()) => {
                     bound = true;
                 }
@@ -86,9 +87,15 @@ pub async fn serve(
             }
         }
         // Readers already open keep reading the live trigger, so a retry must
-        // not start a second set: one press would become two.
-        if retries.recv().await.is_none() {
-            return;
+        // not start a second set: one press would become two. A reader that
+        // exits clears the flag, so "Ask again" can re-enumerate after a device
+        // disappears.
+        tokio::select! {
+            Some(()) = retries.recv() => {}
+            Some(()) = exited_rx.recv() => {
+                bound = false;
+            }
+            else => return,
         }
     }
 }
@@ -97,6 +104,7 @@ fn bind_keyboards(
     access: &SharedAccess,
     inbox: &Sender<Input>,
     loaded: Arc<Mutex<Result<Config, String>>>,
+    exited: UnboundedSender<()>,
 ) -> Result<(), String> {
     let configured_key = current_key(&loaded)?;
     let devices = find_keyboards()?;
@@ -104,7 +112,8 @@ fn bind_keyboards(
     for (path, device) in devices {
         let tx = inbox.clone();
         let loaded = Arc::clone(&loaded);
-        thread::spawn(move || read_loop(path, device, loaded, tx));
+        let exited = exited.clone();
+        thread::spawn(move || read_loop(path, device, loaded, tx, exited));
     }
 
     eprintln!("hotkey: listening on evdev for {configured_key}");
@@ -186,12 +195,16 @@ fn read_loop(
     mut device: Device,
     loaded: Arc<Mutex<Result<Config, String>>>,
     inbox: Sender<Input>,
+    exited: UnboundedSender<()>,
 ) {
     loop {
         let events = match device.fetch_events() {
             Ok(events) => events,
             Err(error) => {
                 eprintln!("hotkey: stopped reading {}: {error}", path.display());
+                if exited.send(()).is_err() {
+                    eprintln!("hotkey: the serve task stopped before the exit was reported");
+                }
                 return;
             }
         };
