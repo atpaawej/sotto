@@ -37,6 +37,18 @@ pub struct Config {
     /// The injectors the clipboard path and ydotool are tried in, in order
     /// (ADR-0004: ordering is data, not code).
     pub text_injectors: Vec<String>,
+    /// Whether the floating Pill is always shown, shown only while dictating,
+    /// or completely hidden.
+    pub pill_visibility: PillVisibility,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PillVisibility {
+    #[default]
+    Always,
+    ActiveOnly,
+    Disabled,
 }
 
 impl Default for Config {
@@ -53,6 +65,7 @@ impl Default for Config {
                 .iter()
                 .map(|name| name.to_string())
                 .collect(),
+            pill_visibility: PillVisibility::default(),
         }
     }
 }
@@ -552,5 +565,19 @@ mod tests {
         providers.set_key(ProviderId::Groq, None);
         assert!(providers.key(ProviderId::Groq).is_none());
         assert_eq!(providers.elevenlabs_key.as_deref(), Some("xi-test"));
+    }
+
+    #[test]
+    fn pill_visibility_defaults_to_always_and_round_trips() {
+        assert_eq!(Config::default().pill_visibility, PillVisibility::Always);
+        for mode in [
+            PillVisibility::Always,
+            PillVisibility::ActiveOnly,
+            PillVisibility::Disabled,
+        ] {
+            let json = serde_json::to_string(&mode).expect("serialize");
+            let back: PillVisibility = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, mode);
+        }
     }
 }

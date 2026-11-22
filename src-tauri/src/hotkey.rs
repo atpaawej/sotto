@@ -19,7 +19,7 @@ use crate::{
     failure::{self, FailureKind},
     keyboard,
     portal::{self, SharedAccess},
-    session::Input,
+    session::{Input, Phase, SharedView},
 };
 
 /// Maps a configured key name (GTK/DOM style or evdev style) to an `evdev::KeyCode`.
@@ -59,13 +59,20 @@ pub async fn serve(
     access: SharedAccess,
     inbox: Sender<Input>,
     loaded: Arc<Mutex<Result<Config, String>>>,
+    view: SharedView,
     mut retries: UnboundedReceiver<()>,
 ) {
     let (exited_tx, mut exited_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut bound = false;
     loop {
         if !bound {
-            match bind_keyboards(&access, &inbox, Arc::clone(&loaded), exited_tx.clone()) {
+            match bind_keyboards(
+                &access,
+                &inbox,
+                Arc::clone(&loaded),
+                Arc::clone(&view),
+                exited_tx.clone(),
+            ) {
                 Ok(()) => {
                     bound = true;
                 }
@@ -104,6 +111,7 @@ fn bind_keyboards(
     access: &SharedAccess,
     inbox: &Sender<Input>,
     loaded: Arc<Mutex<Result<Config, String>>>,
+    view: SharedView,
     exited: UnboundedSender<()>,
 ) -> Result<(), String> {
     let configured_key = current_key(&loaded)?;
@@ -112,8 +120,9 @@ fn bind_keyboards(
     for (path, device) in devices {
         let tx = inbox.clone();
         let loaded = Arc::clone(&loaded);
+        let view = Arc::clone(&view);
         let exited = exited.clone();
-        thread::spawn(move || read_loop(path, device, loaded, tx, exited));
+        thread::spawn(move || read_loop(path, device, loaded, view, tx, exited));
     }
 
     eprintln!("hotkey: listening on evdev for {configured_key}");
@@ -194,6 +203,7 @@ fn read_loop(
     path: PathBuf,
     mut device: Device,
     loaded: Arc<Mutex<Result<Config, String>>>,
+    view: SharedView,
     inbox: Sender<Input>,
     exited: UnboundedSender<()>,
 ) {
@@ -212,7 +222,10 @@ fn read_loop(
         for event in events {
             if let EventSummary::Key(_, code, value) = event.destructure() {
                 if code == KeyCode::KEY_ESC && value == 1 {
-                    if inbox.send(Input::Cancel).is_err() {
+                    let active = view
+                        .lock()
+                        .is_ok_and(|v| matches!(v.phase, Phase::Listening | Phase::Working));
+                    if active && inbox.send(Input::Cancel).is_err() {
                         return;
                     }
                     continue;

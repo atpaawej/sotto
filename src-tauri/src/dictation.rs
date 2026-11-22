@@ -16,6 +16,7 @@ use crate::{
     audio::{self, AudioError, Capture, LevelCallback},
     cleanup::{CleanRequest, Cleaner, CleanupError, GroqCleaner},
     config::{describe, CleanupLevel, Config, ProviderId},
+    devlog,
     failure::{self, Failure},
     transcribe::{model_for, transcriber_for, Request, TranscribeError},
 };
@@ -193,6 +194,16 @@ impl Dictation {
             None
         };
         let uploaded = Arc::new(Mutex::new(None));
+        devlog::step(
+            "transcribe",
+            format!(
+                "sending {} bytes ({}ms) to {} ({})",
+                wav.len(),
+                duration_ms,
+                provider.as_str(),
+                model
+            ),
+        );
         let sent = Instant::now();
         let transcript = transcriber.transcribe(&Request {
             wav: &wav,
@@ -204,6 +215,13 @@ impl Dictation {
         let round_trip = sent.elapsed();
         let marked = uploaded.lock().ok().and_then(|mark| *mark);
         let (upload_ms, provider_ms) = split_round_trip(round_trip, marked, sent);
+        devlog::step(
+            "transcribe",
+            format!(
+                "received raw transcript (upload={}ms provider={}ms): {:?}",
+                upload_ms, provider_ms, transcript.text
+            ),
+        );
 
         let (cleaned, cleanup_failure, cleanup_model, cleanup_ms) =
             run_cleanup(config, &transcript.text, cleaner);
@@ -234,6 +252,7 @@ fn run_cleanup(
     cleaner: Option<&dyn Cleaner>,
 ) -> (String, Option<Failure>, Option<String>, u64) {
     if config.cleanup.level == CleanupLevel::None || transcript.trim().is_empty() {
+        devlog::step("cleanup", "skipped (level=none or empty transcript)");
         return (transcript.to_owned(), None, None, 0);
     }
 
@@ -288,6 +307,10 @@ fn run_cleanup(
         &empty_dict
     };
 
+    devlog::step(
+        "cleanup",
+        format!("running level={:?} model={}", config.cleanup.level, model),
+    );
     let started = Instant::now();
     match cleaner_ref.clean(&CleanRequest {
         transcript,
@@ -299,20 +322,27 @@ fn run_cleanup(
         whitespace: config.cleanup.whitespace,
         dictionary,
     }) {
-        Ok(cleaned) => (
-            cleaned,
-            None,
-            Some(model.to_owned()),
-            millis(started.elapsed()),
-        ),
+        Ok(cleaned) => {
+            let cleanup_ms = millis(started.elapsed());
+            devlog::step(
+                "cleanup",
+                format!("completed in {cleanup_ms}ms: {:?}", cleaned),
+            );
+            (cleaned, None, Some(model.to_owned()), cleanup_ms)
+        }
         Err(err) => {
+            let cleanup_ms = millis(started.elapsed());
             let message = describe(&err);
+            devlog::step(
+                "cleanup",
+                format!("FAILED in {cleanup_ms}ms ({message}); falling back to raw transcript"),
+            );
             eprintln!("cleanup: {message}");
             (
                 transcript.to_owned(),
                 Some(failure::from_cleanup(err)),
                 Some(model.to_owned()),
-                millis(started.elapsed()),
+                cleanup_ms,
             )
         }
     }

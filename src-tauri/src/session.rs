@@ -23,6 +23,7 @@ use serde::Serialize;
 
 use crate::{
     config::ProviderId,
+    devlog,
     dictation::{Attempt, Captured},
     failure::{self, Failure, FailureKind},
     history::{HistoryPort, Injection, RetrySource, StoredRecording},
@@ -211,6 +212,11 @@ pub struct Session {
     /// A retry with the other provider compares results in History; it must
     /// not paste the second result into the focused app.
     no_inject_next: bool,
+    /// Wall-clock start of the post-recording pipeline (key release / stop)
+    /// for end-to-end latency logging.
+    pipeline_started: Option<Instant>,
+    /// Time spent saving the Recording to History before transcription.
+    history_record_ms: u64,
 }
 
 impl Session {
@@ -231,6 +237,8 @@ impl Session {
             pending_storage_failure: None,
             busy_until: None,
             no_inject_next: false,
+            pipeline_started: None,
+            history_record_ms: 0,
         }
     }
 
@@ -264,6 +272,30 @@ impl Session {
     }
 
     pub fn handle(&mut self, input: Input) -> Vec<Effect> {
+        match &input {
+            Input::Press { .. } => devlog::step("trigger", "hotkey press detected"),
+            Input::Release { .. } => devlog::step("trigger", "hotkey release detected"),
+            Input::Toggle { .. } => devlog::step("trigger", "pill/UI toggle detected"),
+            Input::Cancel => {
+                if !matches!(self.state, State::Idle) {
+                    devlog::step("trigger", "cancel requested");
+                }
+            }
+            Input::Retry { id } => devlog::step(
+                "trigger",
+                format!("retry requested (id={})", id.as_deref().unwrap_or("last")),
+            ),
+            Input::RetryOther { id } => devlog::step(
+                "trigger",
+                format!(
+                    "retry with other provider requested (id={})",
+                    id.as_deref().unwrap_or("last")
+                ),
+            ),
+            Input::Transcript { .. }
+            | Input::CapabilityFailed { .. }
+            | Input::CapabilityRestored { .. } => {}
+        }
         match input {
             Input::Press { at } => self.press(at),
             Input::Release { at } => self.release(at),
@@ -310,6 +342,7 @@ impl Session {
 
                 match self.ports.capture.start() {
                     Ok(()) => {
+                        devlog::step("record", format!("microphone started (locked={locked})"));
                         self.state = State::Listening { since: at, locked };
                         self.last_tap_end = None;
                         self.last.message = None;
@@ -322,6 +355,10 @@ impl Session {
                         Vec::new()
                     }
                     Err(failure) => {
+                        devlog::step(
+                            "record",
+                            format!("microphone failed to start: {}", failure.detail),
+                        );
                         self.state = State::Idle;
                         self.last.attempt = None;
                         self.fail(failure, None, Some(FAILED_VISIBLE))
@@ -353,30 +390,51 @@ impl Session {
 
     /// Stops the microphone, saves the Recording, and asks the runner to
     /// transcribe it.
-    fn finish(&mut self, _at: Instant) -> Vec<Effect> {
+    fn finish(&mut self, at: Instant) -> Vec<Effect> {
+        self.pipeline_started = Some(at);
+        self.history_record_ms = 0;
         self.last.injected = false;
         let captured = match self.ports.capture.stop() {
             Ok(captured) => captured,
             Err(failure) => {
+                devlog::step(
+                    "record",
+                    format!("microphone failed to stop: {}", failure.detail),
+                );
                 self.state = State::Idle;
                 return self.fail(failure, None, Some(FAILED_VISIBLE));
             }
         };
 
+        devlog::step(
+            "record",
+            format!(
+                "microphone stopped: duration={}ms wav={} bytes silent={} (stop={}ms encode={}ms)",
+                captured.duration_ms,
+                captured.wav.len(),
+                captured.silent,
+                captured.stop_ms,
+                captured.encode_ms
+            ),
+        );
+
         self.state = State::Idle;
         self.last.face = Phase::Idle;
 
         if captured.duration_ms < MIN_HOLD.as_millis() as u64 {
+            devlog::step("record", "discarded (too short)");
             self.last_tap_end = None;
             return self.hint("Too short — hold a little longer");
         }
         if captured.silent {
+            devlog::step("record", "discarded (silent)");
             return self.hint("Nothing was heard");
         }
 
         // The Recording is saved before the provider is asked. If the save
         // fails, the words are still transcribed and inserted; the warning is
         // attached to the result rather than losing the sentence.
+        let save_started = Instant::now();
         let (id, storage_failure) = match self.ports.history.record(&captured) {
             Ok(StoredRecording { id }) => (Some(id), None),
             Err(failure) => {
@@ -384,6 +442,7 @@ impl Session {
                 (None, Some(failure))
             }
         };
+        self.history_record_ms = save_started.elapsed().as_millis() as u64;
         self.pending_storage_failure = storage_failure;
 
         self.state = State::Working { cancelled: false };
@@ -480,14 +539,54 @@ impl Session {
                     return self.hint("No words came back");
                 }
 
+                let inject_started = Instant::now();
                 let (outcome, injection_failure) = if inject {
-                    match self.ports.injector.inject(&text) {
-                        Ok(()) => (Injection::Inserted, None),
+                    devlog::step(
+                        "inject",
+                        format!("injecting {} bytes into focused app", text.len()),
+                    );
+                    let res = self.ports.injector.inject(&text);
+                    let inject_ms = inject_started.elapsed().as_millis() as u64;
+                    let end_to_end_ms = self
+                        .pipeline_started
+                        .take()
+                        .map(|started| started.elapsed().as_millis() as u64)
+                        .unwrap_or(attempt.timings.total_ms + inject_ms);
+                    let outcome = match res {
+                        Ok(()) => {
+                            devlog::step("inject", format!("pasted successfully in {inject_ms}ms"));
+                            (Injection::Inserted, None)
+                        }
                         Err(reason) => {
+                            devlog::step("inject", format!("paste failed in {inject_ms}ms: {reason}"));
                             (Injection::Blocked, Some(failure::injection(reason)))
                         }
+                    };
+                    if devlog::enabled() {
+                        let status = if outcome.1.is_none() { "ok" } else { "paste failed" };
+                        let audio_ms = attempt.timings.stop_ms + attempt.timings.encode_ms;
+                        eprintln!(
+                            "\n──────────────────────────────────────────────────\n\
+                             Dictation latency (key release → pasted): {end_to_end_ms} ms ({status})\n\
+                             \x20 • Stop & encode audio : {audio_ms:>5} ms (stop {} ms, encode {} ms)\n\
+                             \x20 • Save recording      : {:>5} ms\n\
+                             \x20 • Upload audio        : {:>5} ms\n\
+                             \x20 • Transcription       : {:>5} ms\n\
+                             \x20 • LLM cleanup         : {:>5} ms\n\
+                             \x20 • Paste (inject)      : {inject_ms:>5} ms\n\
+                             ──────────────────────────────────────────────────",
+                            attempt.timings.stop_ms,
+                            attempt.timings.encode_ms,
+                            self.history_record_ms,
+                            attempt.timings.upload_ms,
+                            attempt.timings.provider_ms,
+                            attempt.timings.cleanup_ms,
+                        );
                     }
+                    outcome
                 } else {
+                    self.pipeline_started = None;
+                    devlog::step("inject", "skipped (retry-other comparison)");
                     (Injection::NotAttempted, None)
                 };
                 // The one unambiguous signal that text reached the focused app.
@@ -534,6 +633,7 @@ impl Session {
                 Vec::new()
             }
             Err(failure) => {
+                devlog::step("transcribe", format!("FAILED: {}", failure.detail));
                 let history_error = match &id {
                     Some(id) => self.ports.history.fail(id, &failure, provider).err(),
                     None => None,

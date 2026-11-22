@@ -30,6 +30,7 @@ import {
   toggleDictation,
   updateCleanup,
   updateDictionary,
+  updatePillVisibility,
   updateProvider,
   updateProviderKey,
   updateRetention,
@@ -42,6 +43,7 @@ import {
   type DictationState,
   type Failure,
   type HistoryEntry,
+  type PillVisibility,
   type ProviderId,
   type UpdateStatus,
 } from "./lib/api";
@@ -122,7 +124,16 @@ export default function App() {
   return (
     <div className="app">
       <nav className="sidebar" aria-label="Settings">
-        <p className="wordmark">Sotto</p>
+        <div className="brand-header">
+          <img
+            src="/logo.png"
+            alt=""
+            className="brand-logo"
+            width={30}
+            height={30}
+          />
+          <p className="wordmark">Sotto</p>
+        </div>
         <ul className="nav">
           {SECTIONS.map((section) => (
             <li key={section.id}>
@@ -201,7 +212,13 @@ function Section({
 
   switch (id) {
     case "general":
-      return <GeneralSection snapshot={snapshot} access={access} />;
+      return (
+        <GeneralSection
+          snapshot={snapshot}
+          access={access}
+          onSnapshot={onSnapshot}
+        />
+      );
 
     case "speech":
       return (
@@ -254,11 +271,14 @@ function Row({
 function GeneralSection({
   snapshot,
   access,
+  onSnapshot,
 }: {
   snapshot?: ConfigSnapshot;
   access: Access | null;
+  onSnapshot: (snapshot: ConfigSnapshot) => void;
 }) {
   const [atLogin, setAtLogin] = useState(false);
+  const [pillSaving, setPillSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -281,7 +301,19 @@ function GeneralSection({
     }
   }
 
+  async function changePillVisibility(visibility: PillVisibility) {
+    if (pillSaving) return;
+    setPillSaving(true);
+    try {
+      const updated = await updatePillVisibility(visibility);
+      onSnapshot(updated);
+    } finally {
+      setPillSaving(false);
+    }
+  }
+
   const injector = access?.injection.active || null;
+  const pillVisibility = snapshot?.config.pill_visibility ?? "always";
 
   return (
     <section className="section">
@@ -315,6 +347,42 @@ function GeneralSection({
               </button>
             }
             hint="The app opens when you log in."
+          />
+          <Row
+            label="Floating pill"
+            value={
+              <div
+                className="segmented"
+                role="group"
+                aria-label="Floating pill visibility"
+              >
+                {(
+                  [
+                    ["always", "Always"],
+                    ["active_only", "While dictating"],
+                    ["disabled", "Hidden"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className="segmented-button"
+                    aria-pressed={pillVisibility === value}
+                    disabled={pillSaving}
+                    onClick={() => void changePillVisibility(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            }
+            hint={
+              pillVisibility === "always"
+                ? "Stays at the bottom centre as a compact bar."
+                : pillVisibility === "active_only"
+                  ? "Appears while listening, working, or showing a result."
+                  : "Hidden at all times. Failures still appear in History and notifications."
+            }
           />
           <Row
             label="Injector"

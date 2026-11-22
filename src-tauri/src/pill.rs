@@ -13,9 +13,12 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Emitter, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
-use crate::session::{SurfacePort, View};
+use crate::{
+    config::PillVisibility,
+    session::{Phase, SurfacePort, View},
+};
 
 const PILL_WIDTH: i32 = 380;
 const PILL_HEIGHT: f64 = 128.0;
@@ -26,7 +29,7 @@ const MARGIN: i32 = 64;
 
 /// Creates the persistent pill window at bottom centre, click-through and
 /// non-focusable. Must be called on the main thread during app setup.
-pub fn create(app: &AppHandle) -> Result<(), String> {
+pub fn create(app: &AppHandle, visibility: PillVisibility) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "pill",
@@ -48,24 +51,115 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     if let Ok(gtk_win) = window.gtk_window() {
-        use gtk::prelude::GtkWindowExt;
+        use gtk::prelude::{GtkWindowExt, WidgetExt};
         gtk_win.set_accept_focus(false);
         gtk_win.set_focus_on_map(false);
         gtk_win.set_skip_taskbar_hint(true);
         gtk_win.set_skip_pager_hint(true);
         gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Notification);
+        let app_handle = app.clone();
+        gtk_win.connect_leave_notify_event(move |_, event| {
+            if event.detail() != gtk::gdk::NotifyType::Inferior {
+                if let Err(error) = app_handle.emit("pill://pointer-leave", ()) {
+                    crate::devlog::step(
+                        "pill",
+                        format!("could not emit pointer-leave: {error}"),
+                    );
+                }
+            }
+            gtk::glib::Propagation::Proceed
+        });
     }
 
-    window
-        .show()
-        .map_err(|error| format!("the pill window could not be shown: {error}"))?;
     place(&window);
     let _ = window.set_always_on_top(true);
     let _ = window.set_visible_on_all_workspaces(true);
     // Keep cursor events enabled so hover tooltips, click-to-dictate, Cancel,
     // and error dismiss work; `accept_focus(false)` prevents stealing focus.
     let _ = window.set_ignore_cursor_events(false);
+
+    if visibility == PillVisibility::Always {
+        window
+            .show()
+            .map_err(|error| format!("the pill window could not be shown: {error}"))?;
+        place(&window);
+    }
     Ok(())
+}
+
+/// Shows or hides the pill window to match the user's `PillVisibility` setting
+/// and the current dictation phase.
+pub fn sync_visibility(app: &AppHandle, visibility: PillVisibility, phase: Phase) {
+    let Some(window) = app.get_webview_window("pill") else {
+        return;
+    };
+    match visibility {
+        PillVisibility::Disabled => {
+            if let Err(error) = window.hide() {
+                crate::devlog::step("pill", format!("could not hide pill window: {error}"));
+            }
+        }
+        PillVisibility::Always => {
+            if let Err(error) = window.show() {
+                crate::devlog::step("pill", format!("could not show pill window: {error}"));
+            }
+            place(&window);
+        }
+        PillVisibility::ActiveOnly => {
+            if phase != Phase::Idle {
+                if let Err(error) = window.show() {
+                    crate::devlog::step("pill", format!("could not show pill window: {error}"));
+                }
+                place(&window);
+            }
+        }
+    }
+}
+
+/// Hides the pill window after an `ActiveOnly` fade-out completes.
+pub fn hide(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("pill") {
+        if let Err(error) = window.hide() {
+            crate::devlog::step("pill", format!("could not hide pill window: {error}"));
+        }
+    }
+}
+
+/// Restricts pointer input on the pill window to the given logical CSS
+/// rectangle so transparent padding around `.pill` passes clicks through.
+pub fn set_input_region(app: &AppHandle, x: f64, y: f64, width: f64, height: f64) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(window) = app.get_webview_window("pill") else {
+            return;
+        };
+        let target = window.clone();
+        if let Err(error) = window.run_on_main_thread(move || {
+            use gtk::prelude::WidgetExt;
+            let Ok(gtk_win) = target.gtk_window() else {
+                return;
+            };
+            let w = width.ceil().max(0.0) as i32;
+            let h = height.ceil().max(0.0) as i32;
+            if w <= 0 || h <= 0 {
+                let empty = gtk::cairo::Region::create();
+                gtk_win.input_shape_combine_region(Some(&empty));
+                return;
+            }
+            let rect = gtk::cairo::RectangleInt::new(
+                x.floor().max(0.0) as i32,
+                y.floor().max(0.0) as i32,
+                w,
+                h,
+            );
+            let region = gtk::cairo::Region::create_rectangle(&rect);
+            gtk_win.input_shape_combine_region(Some(&region));
+        }) {
+            crate::devlog::step("pill", format!("could not update input region: {error}"));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (app, x, y, width, height);
 }
 
 pub struct PillSurface {

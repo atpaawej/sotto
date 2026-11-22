@@ -4,6 +4,8 @@ export type ProviderId = "eleven_labs" | "groq";
 
 export type CleanupLevel = "none" | "light" | "medium";
 
+export type PillVisibility = "always" | "active_only" | "disabled";
+
 export interface Cleanup {
   level: CleanupLevel;
   model: string;
@@ -24,6 +26,7 @@ export interface Config {
   cleanup: Cleanup;
   dictionary: string[];
   retention_days: number | null;
+  pill_visibility: PillVisibility;
 }
 
 export interface ConfigSnapshot {
@@ -45,6 +48,29 @@ export function readConfig(): Promise<ConfigSnapshot> {
 
 export function updateCleanup(cleanup: Cleanup): Promise<ConfigSnapshot> {
   return invoke<ConfigSnapshot>("update_cleanup", { cleanup });
+}
+
+export function updatePillVisibility(
+  visibility: PillVisibility,
+): Promise<ConfigSnapshot> {
+  return invoke<ConfigSnapshot>("update_pill_visibility", { visibility });
+}
+
+export function readPillVisibility(): Promise<PillVisibility> {
+  return invoke<PillVisibility>("pill_visibility");
+}
+
+export function hidePillWindow(): Promise<void> {
+  return invoke<void>("hide_pill_window");
+}
+
+export function setPillInputRegion(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke<void>("set_pill_input_region", { x, y, width, height });
 }
 
 export function updateDictionary(dictionary: string[]): Promise<ConfigSnapshot> {

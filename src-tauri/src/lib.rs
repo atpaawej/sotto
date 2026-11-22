@@ -7,6 +7,7 @@
 mod audio;
 mod cleanup;
 mod config;
+mod devlog;
 mod dictation;
 mod failure;
 mod history;
@@ -26,7 +27,9 @@ use std::{
     time::Instant,
 };
 
-use config::{describe, normalize_dictionary, Cleanup, Config, ConfigStore, ProviderId};
+use config::{
+    describe, normalize_dictionary, Cleanup, Config, ConfigStore, PillVisibility, ProviderId,
+};
 use dictation::{Captured, Dictation};
 use failure::{Failure, FailureKind};
 use history::{Entry, History};
@@ -148,6 +151,59 @@ fn update_cleanup(state: State<'_, AppState>, cleanup: Cleanup) -> Result<Config
     mutate_config(&state, |config| {
         config.cleanup = cleanup;
     })
+}
+
+#[tauri::command]
+fn update_pill_visibility(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    visibility: PillVisibility,
+) -> Result<ConfigSnapshot, String> {
+    let snapshot = mutate_config(&state, |config| {
+        config.pill_visibility = visibility;
+    })?;
+    let phase = state
+        .view
+        .lock()
+        .map(|view| view.phase)
+        .unwrap_or(session::Phase::Idle);
+    pill::sync_visibility(&app, visibility, phase);
+    if visibility == PillVisibility::ActiveOnly && phase == session::Phase::Idle {
+        pill::hide(&app);
+    }
+    if let Err(error) = app.emit("pill://visibility", visibility) {
+        devlog::step("pill", format!("could not emit pill visibility: {error}"));
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn pill_visibility(state: State<'_, AppState>) -> PillVisibility {
+    current_config(&state.loaded)
+        .map(|config| config.pill_visibility)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn hide_pill_window(state: State<'_, AppState>, app: AppHandle) {
+    let visibility = current_config(&state.loaded)
+        .map(|config| config.pill_visibility)
+        .unwrap_or_default();
+    let phase = state
+        .view
+        .lock()
+        .map(|view| view.phase)
+        .unwrap_or(session::Phase::Idle);
+    if visibility == PillVisibility::Disabled
+        || (visibility == PillVisibility::ActiveOnly && phase == session::Phase::Idle)
+    {
+        pill::hide(&app);
+    }
+}
+
+#[tauri::command]
+fn set_pill_input_region(app: AppHandle, x: f64, y: f64, width: f64, height: f64) {
+    pill::set_input_region(&app, x, y, width, height);
 }
 
 #[tauri::command]
@@ -408,6 +464,17 @@ fn unix_mode(_metadata: &std::fs::Metadata) -> String {
     "not tracked on this platform".to_owned()
 }
 
+/// Surfaces a failure via desktop notification when the Pill is disabled (ADR-0005).
+fn notify_failure(reason: &str) {
+    // best-effort: desktop notifications may be unavailable in headless or minimal sessions.
+    if let Err(error) = std::process::Command::new("notify-send")
+        .args(["Sotto — Dictation failed", reason])
+        .spawn()
+    {
+        devlog::step("notify", format!("could not send desktop notification: {error}"));
+    }
+}
+
 fn show_main(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("the main window is missing, so the tray cannot open it");
@@ -431,6 +498,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             config_snapshot,
             update_cleanup,
+            update_pill_visibility,
+            pill_visibility,
+            hide_pill_window,
+            set_pill_input_region,
             update_dictionary,
             update_provider,
             update_provider_key,
@@ -474,7 +545,7 @@ pub fn run() {
 
             let access = portal::shared_access();
 
-            pill::create(app.handle()).map_err(std::io::Error::other)?;
+            pill::create(app.handle(), config.pill_visibility).map_err(std::io::Error::other)?;
 
             let loaded_state = Arc::new(Mutex::new(loaded));
             let history = Arc::new(History::open_default());
@@ -510,6 +581,7 @@ pub fn run() {
                 Arc::clone(&access),
                 inbox.clone(),
                 Arc::clone(&loaded_state),
+                Arc::clone(&view),
                 retry_hotkey_rx,
             ));
 
@@ -529,12 +601,17 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
 
-            let icon = app.default_window_icon().cloned().ok_or_else(|| {
-                std::io::Error::other("the app has no window icon to reuse for the tray")
-            })?;
+            let app_icon = tauri::include_image!("icons/icon.png");
+            if let Some(main_window) = app.get_webview_window("main") {
+                if let Err(error) = main_window.set_icon(app_icon) {
+                    devlog::step("window", format!("could not set main window icon: {error}"));
+                }
+            }
+
+            let tray_icon = tauri::include_image!("icons/tray.png");
 
             TrayIconBuilder::with_id("sotto")
-                .icon(icon)
+                .icon(tray_icon)
                 .tooltip("Sotto")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -609,6 +686,16 @@ fn start_session(
             let work = session.handle(input);
             let current = session.view();
             session::publish(&session_view, current.clone());
+            if let Ok(config) = current_config(&loaded) {
+                pill::sync_visibility(&app, config.pill_visibility, current.phase);
+                if config.pill_visibility == PillVisibility::Disabled
+                    && current.phase == session::Phase::Failed
+                {
+                    if let Some(failure) = &current.failure {
+                        notify_failure(failure.reason());
+                    }
+                }
+            }
             let _ = app.emit("dictation://state", &current);
 
             for effect in work {
