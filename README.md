@@ -3,8 +3,8 @@
 Hold a key, speak, and clean text lands where your cursor is. An open-source
 dictation app for Linux.
 
-This is the shell: the window, the tray icon, and the settings file. Dictation
-itself is on its way.
+Hold a key, speak, release — and the cleaned text lands at your cursor, using
+your own API key.
 
 ## Run it
 
@@ -29,6 +29,17 @@ server:
 npm run tauri build
 src-tauri/target/release/sotto
 ```
+
+## First run
+
+The first launch opens a four-step setup: pick Groq or ElevenLabs, paste that
+provider's key, let Sotto make a real request to prove it, then choose a
+shortcut and dictate one sentence. The wizard only closes once that dictation
+has landed at your cursor.
+
+Speech keeps a key for each provider and can test either one; only the active
+provider receives your audio. History can re-transcribe any Recording with the
+other provider, leaving both named results side by side.
 
 ## Settings
 

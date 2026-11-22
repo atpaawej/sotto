@@ -22,9 +22,10 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::describe,
+    config::{describe, ProviderId},
     dictation::{Attempt, Captured},
     failure::{Failure, FailureKind},
+    transcribe::model_for,
 };
 
 /// How the finished text reached the focused app.
@@ -628,10 +629,16 @@ pub struct StoredRecording {
     pub id: String,
 }
 
-/// What Retry needs: the Recording exactly as it was captured.
+/// What Retry needs: the Recording exactly as it was captured, the row that
+/// receives the result, and the provider to transcribe it with.
 #[derive(Debug, Clone)]
 pub struct RetrySource {
     pub captured: Captured,
+    /// Different from the source row when retrying with the other provider:
+    /// the first result stays in History beside the new one.
+    pub id: String,
+    /// `None` means the active provider; `Some` forces a specific one.
+    pub provider: Option<ProviderId>,
 }
 
 /// The session's view of History. Small on purpose: the state machine does not
@@ -645,8 +652,16 @@ pub trait HistoryPort {
         injection: Injection,
         failure: Option<&Failure>,
     ) -> Result<(), Failure>;
-    fn fail(&mut self, id: &str, failure: &Failure) -> Result<(), Failure>;
+    fn fail(
+        &mut self,
+        id: &str,
+        failure: &Failure,
+        provider: Option<ProviderId>,
+    ) -> Result<(), Failure>;
     fn retry_source(&mut self, id: &str) -> Result<RetrySource, Failure>;
+    /// Re-transcribes the Recording with the other provider. The original
+    /// result is kept; the retry is a new row that shares the Recording.
+    fn retry_other(&mut self, id: &str) -> Result<RetrySource, Failure>;
 }
 
 /// The durable History: rows in [`SqliteStore`], WAVs in [`RecordingStore`].
@@ -780,7 +795,12 @@ impl History {
             .map_err(|error| Failure::storage(&error))
     }
 
-    pub fn fail(&self, id: &str, failure: &Failure) -> Result<(), Failure> {
+    pub fn fail(
+        &self,
+        id: &str,
+        failure: &Failure,
+        provider: Option<ProviderId>,
+    ) -> Result<(), Failure> {
         let mut entry = self
             .store
             .get(id)
@@ -792,6 +812,12 @@ impl History {
                 )
             })?;
 
+        // A failure still knows which provider tried. Without this, a failed
+        // row cannot be retried with the other provider.
+        if let Some(provider) = provider {
+            entry.provider = provider.as_str().to_owned();
+            entry.model = model_for(provider).to_owned();
+        }
         entry.failure = Some(failure.clone());
         entry.injection = Injection::NotAttempted;
         entry.finished_at_ms = Some(now_ms().map_err(|error| Failure::storage(&error))?);
@@ -800,18 +826,7 @@ impl History {
             .map_err(|error| Failure::storage(&error))
     }
 
-    pub fn retry_source(&self, id: &str) -> Result<RetrySource, Failure> {
-        let entry = self
-            .store
-            .get(id)
-            .map_err(|error| Failure::storage(&error))?
-            .ok_or_else(|| {
-                Failure::new(
-                    FailureKind::StorageFailed,
-                    "that dictation is no longer in history".to_owned(),
-                )
-            })?;
-
+    fn captured_for(&self, entry: &Entry) -> Result<Captured, Failure> {
         if entry.recording_path.is_empty() {
             return Err(Failure::new(
                 FailureKind::StorageFailed,
@@ -824,14 +839,59 @@ impl History {
             .read(Path::new(&entry.recording_path))
             .map_err(|error| Failure::storage(&error))?;
 
+        Ok(Captured {
+            wav,
+            duration_ms: entry.duration_ms,
+            stop_ms: 0,
+            encode_ms: 0,
+            silent: false,
+        })
+    }
+
+    pub fn retry_source(&self, id: &str) -> Result<RetrySource, Failure> {
+        let entry = self.entry(id)?;
         Ok(RetrySource {
-            captured: Captured {
-                wav,
-                duration_ms: entry.duration_ms,
-                stop_ms: 0,
-                encode_ms: 0,
-                silent: false,
-            },
+            captured: self.captured_for(&entry)?,
+            id: entry.id,
+            provider: None,
+        })
+    }
+
+    /// Sends a stored Recording to the other provider, keeping the first
+    /// result: the retry is a new row that shares the same Recording. Both
+    /// results stay in History, each named with the provider that produced it.
+    pub fn retry_other(&self, id: &str) -> Result<RetrySource, Failure> {
+        let entry = self.entry(id)?;
+        let Some(provider) = ProviderId::parse(&entry.provider) else {
+            return Err(Failure::new(
+                FailureKind::StorageFailed,
+                format!("dictation {id} has no known provider to retry with"),
+            ));
+        };
+        let other = provider.other();
+        let captured = self.captured_for(&entry)?;
+
+        let retried = Entry {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at_ms: now_ms().map_err(|error| Failure::storage(&error))?,
+            finished_at_ms: None,
+            duration_ms: entry.duration_ms,
+            provider: other.as_str().to_owned(),
+            model: model_for(other).to_owned(),
+            transcript: String::new(),
+            cleaned: String::new(),
+            injection: Injection::NotAttempted,
+            failure: None,
+            recording_path: entry.recording_path.clone(),
+        };
+        self.store
+            .insert(&retried)
+            .map_err(|error| Failure::storage(&error))?;
+
+        Ok(RetrySource {
+            captured,
+            id: retried.id,
+            provider: Some(other),
         })
     }
 
@@ -873,10 +933,12 @@ impl History {
             .get(id)
             .map_err(|error| Failure::storage(&error))?;
         if let Some(entry) = entry {
-            self.remove_recording(&entry)?;
+            // Drop the row first: an orphan WAV is harmless, a row pointing at
+            // a deleted Recording breaks Play and Retry.
             self.store
                 .delete(id)
                 .map_err(|error| Failure::storage(&error))?;
+            self.remove_recording(&entry)?;
         }
         Ok(())
     }
@@ -886,13 +948,23 @@ impl History {
             .store
             .list("")
             .map_err(|error| Failure::storage(&error))?;
-        for entry in &entries {
-            self.remove_recording(entry)?;
-        }
         self.store
             .delete_all()
             .map(|_| ())
-            .map_err(|error| Failure::storage(&error))
+            .map_err(|error| Failure::storage(&error))?;
+
+        // Two results can share one Recording. Remove each distinct file once,
+        // after no row can still point at it.
+        let mut removed = std::collections::HashSet::new();
+        for entry in &entries {
+            if entry.recording_path.is_empty() || !removed.insert(entry.recording_path.as_str()) {
+                continue;
+            }
+            self.recordings
+                .remove(Path::new(&entry.recording_path))
+                .map_err(|error| Failure::storage(&error))?;
+        }
+        Ok(())
     }
 
     /// Deletes rows and recordings older than `days`. `None` means keep
@@ -909,16 +981,27 @@ impl History {
             .before(cutoff)
             .map_err(|error| Failure::storage(&error))?;
         for entry in &expired {
-            self.remove_recording(entry)?;
             self.store
                 .delete(&entry.id)
                 .map_err(|error| Failure::storage(&error))?;
+            self.remove_recording(entry)?;
         }
         Ok(expired.len())
     }
 
     fn remove_recording(&self, entry: &Entry) -> Result<(), Failure> {
         if entry.recording_path.is_empty() {
+            return Ok(());
+        }
+        // A retry with the other provider shares this Recording. Keep the file
+        // until the last entry that points at it is gone.
+        let still_used = self
+            .store
+            .list("")
+            .map_err(|error| Failure::storage(&error))?
+            .iter()
+            .any(|other| other.id != entry.id && other.recording_path == entry.recording_path);
+        if still_used {
             return Ok(());
         }
         self.recordings
@@ -942,12 +1025,21 @@ impl HistoryPort for Arc<History> {
         (**self).complete(id, attempt, injection, failure)
     }
 
-    fn fail(&mut self, id: &str, failure: &Failure) -> Result<(), Failure> {
-        (**self).fail(id, failure)
+    fn fail(
+        &mut self,
+        id: &str,
+        failure: &Failure,
+        provider: Option<ProviderId>,
+    ) -> Result<(), Failure> {
+        (**self).fail(id, failure, provider)
     }
 
     fn retry_source(&mut self, id: &str) -> Result<RetrySource, Failure> {
         (**self).retry_source(id)
+    }
+
+    fn retry_other(&mut self, id: &str) -> Result<RetrySource, Failure> {
+        (**self).retry_other(id)
     }
 }
 
@@ -1219,7 +1311,9 @@ mod tests {
         let stored = history.record(&captured()).expect("record");
         let failure = Failure::new(FailureKind::Network, "offline");
 
-        history.fail(&stored.id, &failure).expect("fail");
+        history
+            .fail(&stored.id, &failure, Some(ProviderId::Groq))
+            .expect("fail");
         let entries = history.list("").expect("list");
         assert_eq!(
             entries[0].failure.as_ref().map(|f| f.kind),
@@ -1229,6 +1323,35 @@ mod tests {
         let source = history.retry_source(&stored.id).expect("retry source");
         assert_eq!(source.captured.wav, b"RIFFfake");
         assert_eq!(source.captured.duration_ms, 2_000);
+    }
+
+    #[test]
+    fn a_failed_entry_still_names_its_provider_for_the_other_retry() {
+        let (_dir, history) = history();
+        let stored = history.record(&captured()).expect("record");
+        history
+            .fail(
+                &stored.id,
+                &Failure::new(FailureKind::Network, "offline"),
+                Some(ProviderId::Groq),
+            )
+            .expect("fail");
+
+        let entry = history.entry(&stored.id).expect("entry");
+        assert_eq!(entry.provider, "groq");
+        assert_eq!(
+            entry.failure.as_ref().map(|failure| failure.kind),
+            Some(FailureKind::Network)
+        );
+
+        let source = history
+            .retry_other(&stored.id)
+            .expect("retry with the other provider");
+
+        assert_eq!(source.provider, Some(ProviderId::ElevenLabs));
+        let entries = history.list("").expect("list");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.provider == "eleven_labs"));
     }
 
     #[test]
@@ -1304,5 +1427,129 @@ mod tests {
         assert_eq!(error.kind, FailureKind::StorageFailed);
         assert!(error.detail.contains("read-only"));
         assert!(history.list("").is_err());
+    }
+
+    /// One recording, two providers: the first result stays beside the retry.
+    fn two_results() -> (tempfile::TempDir, History, String, String) {
+        let (dir, history) = history();
+        let stored = history.record(&captured()).expect("record");
+        history
+            .complete(
+                &stored.id,
+                &attempt("Groq heard this."),
+                Injection::Inserted,
+                None,
+            )
+            .expect("complete first result");
+
+        let source = history
+            .retry_other(&stored.id)
+            .expect("retry with the other provider");
+        let mut retried = attempt("ElevenLabs heard that.");
+        retried.provider = "eleven_labs".to_owned();
+        retried.model = "scribe_v3".to_owned();
+        history
+            .complete(&source.id, &retried, Injection::Inserted, None)
+            .expect("complete retry");
+
+        (dir, history, stored.id, source.id)
+    }
+
+    #[test]
+    fn retrying_with_the_other_provider_keeps_both_named_results() {
+        let (_dir, history, original, retried) = two_results();
+        let entries = history.list("").expect("list");
+
+        assert_eq!(entries.len(), 2);
+        let first = entries.iter().find(|entry| entry.id == original).expect("original");
+        let second = entries.iter().find(|entry| entry.id == retried).expect("retry");
+        assert_eq!(first.provider, "groq");
+        assert_eq!(first.cleaned, "Groq heard this.");
+        assert_eq!(second.provider, "eleven_labs");
+        assert_eq!(second.cleaned, "ElevenLabs heard that.");
+        assert_eq!(
+            first.recording_path, second.recording_path,
+            "both results read the same Recording"
+        );
+        assert!(Path::new(&first.recording_path).exists());
+    }
+
+    #[test]
+    fn an_other_provider_retry_can_be_retried_back() {
+        let (_dir, history, _original, retried) = two_results();
+
+        let source = history.retry_other(&retried).expect("retry back");
+
+        assert_eq!(source.provider, Some(ProviderId::Groq));
+        let entries = history.list("").expect("list");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.id == source.id)
+                .expect("third result")
+                .provider,
+            "groq"
+        );
+    }
+
+    #[test]
+    fn deleting_one_result_keeps_the_recording_for_the_other() {
+        let (_dir, history, original, retried) = two_results();
+        let path = history.entry(&original).expect("entry").recording_path.clone();
+
+        history.delete(&original).expect("delete first result");
+
+        assert!(
+            Path::new(&path).exists(),
+            "the other result still owns the Recording"
+        );
+        assert_eq!(
+            history.retry_source(&retried).expect("retry source").captured.wav,
+            b"RIFFfake"
+        );
+
+        history.delete(&retried).expect("delete second result");
+        assert!(!Path::new(&path).exists());
+    }
+
+    #[test]
+    fn retention_keeps_a_shared_recording_for_the_newer_result() {
+        let (_dir, history, original, retried) = two_results();
+        let mut aged = history.entry(&original).expect("original");
+        aged.created_at_ms = 1;
+        history.store.update(&aged).expect("age the row");
+        let path = aged.recording_path.clone();
+
+        history.enforce_retention(Some(30)).expect("retention");
+
+        let remaining = history.list("").expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, retried);
+        assert!(Path::new(&path).exists(), "the retry still owns the Recording");
+    }
+
+    #[test]
+    fn delete_all_removes_a_shared_recording_once() {
+        let (_dir, history, original, _retried) = two_results();
+        let path = history.entry(&original).expect("entry").recording_path.clone();
+
+        history.delete_all().expect("delete all");
+
+        assert!(history.list("").expect("list").is_empty());
+        assert!(!Path::new(&path).exists());
+    }
+
+    #[test]
+    fn retrying_an_entry_without_a_known_provider_is_a_failure() {
+        let (_dir, history) = history();
+        let stored = history.record(&captured()).expect("record");
+        let mut row = history.entry(&stored.id).expect("entry");
+        row.provider = String::new();
+        history.store.update(&row).expect("write the row back");
+
+        let error = history.retry_other(&stored.id).expect_err("no provider");
+
+        assert!(error.detail.contains("no known provider"));
     }
 }

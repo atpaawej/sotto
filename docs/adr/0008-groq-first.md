@@ -1,6 +1,10 @@
 # Groq is the provider that ships first
 
-The first provider wired up is Groq's Whisper `large-v3-turbo`, not ElevenLabs Scribe. `active_provider` defaults to Groq, and a config written by the walking-skeleton build moves to Groq on load when it never held an ElevenLabs key. ElevenLabs stays in the config schema, unwired, for ticket #8 to finish.
+> Amended by #8: ElevenLabs Scribe is now wired behind the same `Transcriber`
+> seam. The decision below still holds — Groq stays the default — but the
+> "unwired" consequences no longer apply.
+
+The first provider wired up is Groq's Whisper `large-v3-turbo`, not ElevenLabs Scribe. `active_provider` defaults to Groq, and a config written by the walking-skeleton build moves to Groq on load when it never held an ElevenLabs key. ElevenLabs was kept in the config schema so #8 could add its adapter without a version bump.
 
 ## Why
 
@@ -10,7 +14,7 @@ Scribe v3 may still be the better transcriber. Nothing in the seam assumes other
 
 ## Consequences
 
-- A build with an ElevenLabs provider selected says so plainly instead of pretending: `Dictation::start` refuses with "ElevenLabs is not wired up in this build", which the window shows.
 - The migration only switches a file that had no ElevenLabs key. A user who pasted one keeps their choice, and their key is not deleted.
-- `Providers::elevenlabs_key` stays in the schema so #8 does not need another version bump.
-- The wizard (#8) tests the key with the provider it will actually use, so it must read `active_provider` rather than assume Groq.
+- `Providers::elevenlabs_key` stays in the schema so #8 did not need another version bump.
+- The wizard (#8) tests the key with the provider it will actually use, so it reads `active_provider` rather than assuming Groq. The Speech section keeps both keys and can test either one.
+- After #8, both adapters return typed failures through the same vocabulary. Selecting ElevenLabs no longer refuses the dictation; History can re-transcribe a Recording with the other provider and keeps both named results.

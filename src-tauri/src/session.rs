@@ -22,6 +22,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
+    config::ProviderId,
     dictation::{Attempt, Captured},
     failure::{self, Failure, FailureKind},
     history::{HistoryPort, Injection, RetrySource, StoredRecording},
@@ -58,11 +59,18 @@ pub enum Input {
     /// to; it is absent only when the Recording itself could not be saved.
     Transcript {
         id: Option<String>,
-        result: Result<Attempt, Failure>,
+        result: Box<Result<Attempt, Failure>>,
+        /// The provider that made the attempt, even when no text came back.
+        provider: Option<ProviderId>,
     },
     /// Re-transcribe a Recording already on disk. `None` retries the last
     /// failed dictation, which is what the Pill's Retry button means.
     Retry {
+        id: Option<String>,
+    },
+    /// Re-transcribe a Recording with the other provider, keeping the first
+    /// result in History beside the new one.
+    RetryOther {
         id: Option<String>,
     },
     /// A background capability failed: the shortcut, the keyboard bridge or
@@ -84,6 +92,9 @@ pub enum Effect {
     Transcribe {
         id: Option<String>,
         captured: Captured,
+        /// `None` uses the active provider; a retry with the other provider
+        /// names the one to use here.
+        provider: Option<ProviderId>,
     },
     /// Something failed before there was anything to transcribe.
     Failed,
@@ -125,6 +136,10 @@ pub struct View {
     /// The Recording Retry would send again. Absent when there is nothing on
     /// disk to retry.
     pub retry_id: Option<String>,
+    /// Whether the last attempt's text reached the focused app. A cleanup
+    /// warning can follow a successful Injection; this is the unambiguous
+    /// signal the first-run wizard needs.
+    pub injected: bool,
 }
 
 impl View {
@@ -137,6 +152,7 @@ impl View {
             attempt: None,
             failure: None,
             retry_id: None,
+            injected: false,
         }
     }
 }
@@ -175,6 +191,7 @@ struct Last {
     message: Option<String>,
     failure: Option<Failure>,
     retry_id: Option<String>,
+    injected: bool,
     /// What an idle session is showing: nothing, a result, advice, or a failure.
     face: Phase,
 }
@@ -191,6 +208,9 @@ pub struct Session {
     /// While a transcription runs, presses from before it finished are late
     /// echoes of a busy app and must not start dictation.
     busy_until: Option<Instant>,
+    /// A retry with the other provider compares results in History; it must
+    /// not paste the second result into the focused app.
+    no_inject_next: bool,
 }
 
 impl Session {
@@ -205,10 +225,12 @@ impl Session {
                 message: None,
                 failure: None,
                 retry_id: None,
+                injected: false,
                 face: Phase::Idle,
             },
             pending_storage_failure: None,
             busy_until: None,
+            no_inject_next: false,
         }
     }
 
@@ -218,6 +240,7 @@ impl Session {
         view.message = self.last.message.clone();
         view.failure = self.last.failure.clone();
         view.retry_id = self.last.retry_id.clone();
+        view.injected = self.last.injected;
 
         match self.state {
             State::Idle => view.phase = self.last.face,
@@ -227,12 +250,14 @@ impl Session {
                 view.message = None;
                 view.failure = None;
                 view.retry_id = None;
+                view.injected = false;
             }
             State::Working { .. } => {
                 view.phase = Phase::Working;
                 view.message = None;
                 view.failure = None;
                 view.retry_id = None;
+                view.injected = false;
             }
         }
         view
@@ -248,8 +273,13 @@ impl Session {
                 State::Working { .. } => Vec::new(),
             },
             Input::Cancel => self.cancel(),
-            Input::Transcript { id, result } => self.transcript(id, result),
+            Input::Transcript {
+                id,
+                result,
+                provider,
+            } => self.transcript(id, result, provider),
             Input::Retry { id } => self.retry(id),
+            Input::RetryOther { id } => self.retry_other(id),
             Input::CapabilityFailed { failure } => self.capability_failed(failure),
             Input::CapabilityRestored { kind } => self.capability_restored(kind),
         }
@@ -285,6 +315,7 @@ impl Session {
                         self.last.message = None;
                         self.last.failure = None;
                         self.last.retry_id = None;
+                        self.last.injected = false;
                         self.last.face = Phase::Idle;
                         self.pending_storage_failure = None;
                         self.show(None);
@@ -323,6 +354,7 @@ impl Session {
     /// Stops the microphone, saves the Recording, and asks the runner to
     /// transcribe it.
     fn finish(&mut self, _at: Instant) -> Vec<Effect> {
+        self.last.injected = false;
         let captured = match self.ports.capture.stop() {
             Ok(captured) => captured,
             Err(failure) => {
@@ -356,10 +388,15 @@ impl Session {
 
         self.state = State::Working { cancelled: false };
         self.show(None);
-        vec![Effect::Transcribe { id, captured }]
+        vec![Effect::Transcribe {
+            id,
+            captured,
+            provider: None,
+        }]
     }
 
     fn cancel(&mut self) -> Vec<Effect> {
+        self.last.injected = false;
         match self.state {
             State::Idle => Vec::new(),
             State::Listening { .. } => {
@@ -380,7 +417,14 @@ impl Session {
         }
     }
 
-    fn transcript(&mut self, id: Option<String>, result: Result<Attempt, Failure>) -> Vec<Effect> {
+    fn transcript(
+        &mut self,
+        id: Option<String>,
+        result: Box<Result<Attempt, Failure>>,
+        provider: Option<ProviderId>,
+    ) -> Vec<Effect> {
+        let inject = !self.no_inject_next;
+        self.no_inject_next = false;
         let cancelled = match self.state {
             State::Working { cancelled } => cancelled,
             // A reply that arrives after a cancel is stale by definition.
@@ -391,7 +435,7 @@ impl Session {
 
         if cancelled {
             self.pending_storage_failure = None;
-            match result {
+            match *result {
                 Ok(attempt) => {
                     if let Some(id) = id {
                         if let Err(failure) = self.ports.history.complete(
@@ -407,7 +451,7 @@ impl Session {
                 Err(failure) => {
                     failure.log();
                     if let Some(id) = id {
-                        if let Err(error) = self.ports.history.fail(&id, &failure) {
+                        if let Err(error) = self.ports.history.fail(&id, &failure, provider) {
                             error.log();
                         }
                     }
@@ -416,7 +460,7 @@ impl Session {
             return Vec::new();
         }
 
-        match result {
+        match *result {
             Ok(attempt) => {
                 let text = attempt.cleaned.trim().to_owned();
                 if text.is_empty() {
@@ -436,60 +480,62 @@ impl Session {
                     return self.hint("No words came back");
                 }
 
-                match self.ports.injector.inject(&text) {
-                    Ok(()) => {
-                        let history_error = match &id {
-                            Some(id) => self
-                                .ports
-                                .history
-                                .complete(id, &attempt, Injection::Inserted, None)
-                                .err(),
-                            None => None,
-                        };
-                        let warning = attempt
-                            .cleanup_failure
-                            .clone()
-                            .or_else(|| self.pending_storage_failure.take())
-                            .or(history_error);
-                        self.last.attempt = Some(attempt);
-
-                        if let Some(warning) = warning {
-                            // The text already landed, so Retry would insert it
-                            // a second time. The warning is worth showing, but
-                            // it is not a retryable dictation.
-                            return self.fail(warning, None, Some(FAILED_VISIBLE));
+                let (outcome, injection_failure) = if inject {
+                    match self.ports.injector.inject(&text) {
+                        Ok(()) => (Injection::Inserted, None),
+                        Err(reason) => {
+                            (Injection::Blocked, Some(failure::injection(reason)))
                         }
+                    }
+                } else {
+                    (Injection::NotAttempted, None)
+                };
+                // The one unambiguous signal that text reached the focused app.
+                self.last.injected = outcome == Injection::Inserted;
 
-                        self.last.message = None;
-                        self.last.failure = None;
-                        self.last.retry_id = None;
-                        self.last.face = Phase::Done;
-                        self.show(Some(DONE_VISIBLE));
-                        Vec::new()
-                    }
-                    Err(reason) => {
-                        let failure = failure::injection(reason);
-                        let history_error = match &id {
-                            Some(id) => self
-                                .ports
-                                .history
-                                .complete(id, &attempt, Injection::Blocked, Some(&failure))
-                                .err(),
-                            None => None,
-                        };
-                        let failure = match history_error {
-                            Some(error) => merge_history_failure(failure, error),
-                            None => failure,
-                        };
-                        self.last.attempt = Some(attempt);
-                        let retry_id = id.clone();
-                        self.fail(failure, retry_id, Some(FAILED_VISIBLE))
-                    }
+                let history_error = match &id {
+                    Some(id) => self
+                        .ports
+                        .history
+                        .complete(id, &attempt, outcome, injection_failure.as_ref())
+                        .err(),
+                    None => None,
+                };
+
+                if let Some(injection_failure) = injection_failure {
+                    let failure = match history_error {
+                        Some(error) => merge_history_failure(injection_failure, error),
+                        None => injection_failure,
+                    };
+                    self.last.attempt = Some(attempt);
+                    let retry_id = id.clone();
+                    return self.fail(failure, retry_id, Some(FAILED_VISIBLE));
                 }
+
+                let warning = attempt
+                    .cleanup_failure
+                    .clone()
+                    .or_else(|| self.pending_storage_failure.take())
+                    .or(history_error);
+                self.last.attempt = Some(attempt);
+
+                if let Some(warning) = warning {
+                    // The text already landed, so Retry would insert it a
+                    // second time. The warning is worth showing, but it is not
+                    // a retryable dictation.
+                    return self.fail(warning, None, Some(FAILED_VISIBLE));
+                }
+
+                self.last.message = None;
+                self.last.failure = None;
+                self.last.retry_id = None;
+                self.last.face = Phase::Done;
+                self.show(Some(DONE_VISIBLE));
+                Vec::new()
             }
             Err(failure) => {
                 let history_error = match &id {
-                    Some(id) => self.ports.history.fail(id, &failure).err(),
+                    Some(id) => self.ports.history.fail(id, &failure, provider).err(),
                     None => None,
                 };
                 let storage_error = self.pending_storage_failure.take();
@@ -509,34 +555,57 @@ impl Session {
 
     /// Sends a Recording already on disk to the provider again.
     fn retry(&mut self, id: Option<String>) -> Vec<Effect> {
-        if !matches!(self.state, State::Idle) {
+        if !self.can_retry() {
             return Vec::new();
         }
-
         let Some(id) = id.or_else(|| self.last.retry_id.clone()) else {
             return self.hint("Nothing to retry");
         };
-
         match self.ports.history.retry_source(&id) {
-            Ok(RetrySource { captured }) => {
-                self.state = State::Working { cancelled: false };
-                self.pending_storage_failure = None;
-                self.last.message = None;
-                self.last.failure = None;
-                self.last.retry_id = None;
-                self.last.face = Phase::Idle;
-                self.show(None);
-                vec![Effect::Transcribe {
-                    id: Some(id),
-                    captured,
-                }]
-            }
-            Err(failure) => {
-                self.state = State::Idle;
-                self.last.attempt = None;
-                self.fail(failure, None, Some(FAILED_VISIBLE))
-            }
+            Ok(source) => self.start_retry(source),
+            Err(failure) => self.retry_failed(failure),
         }
+    }
+
+    /// Sends it to the other provider. History keeps both results.
+    fn retry_other(&mut self, id: Option<String>) -> Vec<Effect> {
+        if !self.can_retry() {
+            return Vec::new();
+        }
+        let Some(id) = id.or_else(|| self.last.retry_id.clone()) else {
+            return self.hint("Nothing to retry");
+        };
+        match self.ports.history.retry_other(&id) {
+            Ok(source) => self.start_retry(source),
+            Err(failure) => self.retry_failed(failure),
+        }
+    }
+
+    fn can_retry(&self) -> bool {
+        matches!(self.state, State::Idle)
+    }
+
+    fn start_retry(&mut self, source: RetrySource) -> Vec<Effect> {
+        self.state = State::Working { cancelled: false };
+        self.pending_storage_failure = None;
+        self.no_inject_next = source.provider.is_some();
+        self.last.injected = false;
+        self.last.message = None;
+        self.last.failure = None;
+        self.last.retry_id = None;
+        self.last.face = Phase::Idle;
+        self.show(None);
+        vec![Effect::Transcribe {
+            id: Some(source.id),
+            captured: source.captured,
+            provider: source.provider,
+        }]
+    }
+
+    fn retry_failed(&mut self, failure: Failure) -> Vec<Effect> {
+        self.state = State::Idle;
+        self.last.attempt = None;
+        self.fail(failure, None, Some(FAILED_VISIBLE))
     }
 
     fn capability_failed(&mut self, failure: Failure) -> Vec<Effect> {
@@ -545,6 +614,7 @@ impl Session {
         self.last.attempt = None;
         self.last.failure = Some(failure);
         self.last.retry_id = None;
+        self.last.injected = false;
         self.last.face = Phase::Failed;
         if matches!(self.state, State::Idle) {
             self.show(Some(FAILED_VISIBLE));
@@ -625,7 +695,7 @@ pub fn publish(view: &SharedView, next: View) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictation::Timings;
+    use crate::{config::ProviderId, dictation::Timings};
     use std::{cell::RefCell, rc::Rc};
 
     const ID: &str = "dictation-1";
@@ -751,14 +821,37 @@ mod tests {
             Ok(())
         }
 
-        fn fail(&mut self, id: &str, failure: &Failure) -> Result<(), Failure> {
+        fn fail(
+            &mut self,
+            id: &str,
+            failure: &Failure,
+            _provider: Option<ProviderId>,
+        ) -> Result<(), Failure> {
             self.0.take().failed.push((id.to_owned(), failure.clone()));
             Ok(())
         }
 
-        fn retry_source(&mut self, _id: &str) -> Result<RetrySource, Failure> {
+        fn retry_source(&mut self, id: &str) -> Result<RetrySource, Failure> {
             match self.0.take().retry.clone() {
-                Some(captured) => Ok(RetrySource { captured }),
+                Some(captured) => Ok(RetrySource {
+                    captured,
+                    id: id.to_owned(),
+                    provider: None,
+                }),
+                None => Err(Failure::new(
+                    FailureKind::StorageFailed,
+                    "no recording to retry",
+                )),
+            }
+        }
+
+        fn retry_other(&mut self, id: &str) -> Result<RetrySource, Failure> {
+            match self.0.take().retry.clone() {
+                Some(captured) => Ok(RetrySource {
+                    captured,
+                    id: format!("other-{id}"),
+                    provider: Some(ProviderId::ElevenLabs),
+                }),
                 None => Err(Failure::new(
                     FailureKind::StorageFailed,
                     "no recording to retry",
@@ -799,7 +892,9 @@ mod tests {
     fn transcribed(text: &str) -> Input {
         Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Ok(attempt(text)),
+            result: Box::new(Ok(attempt(text)),
+            ),
+            provider: None,
         }
     }
 
@@ -840,7 +935,9 @@ mod tests {
         att.cleanup_failure = Some(Failure::new(FailureKind::RateLimited, "rate limited"));
         let effects = session.handle(Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Ok(att),
+            result: Box::new(Ok(att),
+            ),
+            provider: None,
         });
 
         let snapshot = fake.take();
@@ -1056,7 +1153,9 @@ mod tests {
         let failure = Failure::new(FailureKind::Network, "the provider could not be reached");
         session.handle(Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Err(failure),
+            result: Box::new(Err(failure),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         assert!(fake.take().injected.is_empty());
@@ -1081,7 +1180,9 @@ mod tests {
         press_and_release(&mut session);
         session.handle(Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Err(Failure::new(FailureKind::Network, "offline")),
+            result: Box::new(Err(Failure::new(FailureKind::Network, "offline")),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         let effects = session.handle(Input::Retry { id: None });
@@ -1089,7 +1190,7 @@ mod tests {
         let transcribe = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::Transcribe { id, captured } => Some((id, captured)),
+                Effect::Transcribe { id, captured, .. } => Some((id, captured)),
                 Effect::Failed => None,
             })
             .expect("retry transcribes the stored recording");
@@ -1101,6 +1202,51 @@ mod tests {
         assert_eq!(fake.take().injected, vec!["Back online.".to_owned()]);
         assert_eq!(session.view().phase, Phase::Done);
         assert!(session.view().failure.is_none());
+    }
+
+    #[test]
+    fn retrying_with_the_other_provider_uses_the_stored_recording() {
+        let fake = Shared::with_capture(2_000, false);
+        let mut session = session(&fake);
+
+        press_and_release(&mut session);
+        session.handle(transcribed("First provider."));
+        let effects = session.handle(Input::RetryOther {
+            id: Some(ID.to_owned()),
+        });
+
+        let transcribe = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Transcribe {
+                    id,
+                    captured,
+                    provider,
+                } => Some((id, captured, provider)),
+                Effect::Failed => None,
+            })
+            .expect("retry transcribes the stored recording");
+        assert_eq!(transcribe.0.as_deref(), Some("other-dictation-1"));
+        assert_eq!(transcribe.1.wav, vec![0u8; 4]);
+        assert_eq!(*transcribe.2, Some(ProviderId::ElevenLabs));
+
+        session.handle(Input::Transcript {
+            id: Some("other-dictation-1".to_owned()),
+            result: Box::new(Ok(attempt("Second provider.")),
+            ),
+            provider: Some(ProviderId::ElevenLabs),
+        });
+
+        let snapshot = fake.take();
+        assert_eq!(snapshot.injected, vec!["First provider.".to_owned()]);
+        assert_eq!(
+            snapshot.completed,
+            vec![
+                (ID.to_owned(), Injection::Inserted, None),
+                ("other-dictation-1".to_owned(), Injection::NotAttempted, None),
+            ],
+            "the other provider's result is kept in History, not pasted"
+        );
     }
 
     /// The acceptance path from ticket 07, with the real History rather than a
@@ -1130,10 +1276,11 @@ mod tests {
 
         session.handle(Input::Transcript {
             id: Some(id.clone()),
-            result: Err(Failure::new(
+            result: Box::new(Err(Failure::new(
                 FailureKind::Network,
                 "the provider could not be reached",
-            )),
+            ))),
+            provider: Some(ProviderId::Groq),
         });
         assert_eq!(
             history
@@ -1149,13 +1296,15 @@ mod tests {
         let effects = session.handle(Input::Retry { id: None });
         assert!(matches!(
             effects.as_slice(),
-            [Effect::Transcribe { id: Some(retried), captured }]
+            [Effect::Transcribe { id: Some(retried), captured, .. }]
                 if retried == &id && captured.wav == vec![0u8; 4]
         ));
 
         session.handle(Input::Transcript {
             id: Some(id.clone()),
-            result: Ok(attempt("Back online.")),
+            result: Box::new(Ok(attempt("Back online.")),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         assert_eq!(fake.take().injected, vec!["Back online.".to_owned()]);
@@ -1190,6 +1339,7 @@ mod tests {
             Some(FailureKind::InjectionBlocked)
         );
         assert_eq!(session.view().retry_id.as_deref(), Some(ID));
+        assert!(!session.view().injected, "blocked text never landed");
         assert_eq!(
             fake.take().completed,
             vec![(
@@ -1204,6 +1354,25 @@ mod tests {
     }
 
     #[test]
+    fn a_successful_injection_is_not_inherited_by_a_later_failure() {
+        let fake = Shared::with_capture(2_000, false);
+        let mut session = session(&fake);
+
+        press_and_release(&mut session);
+        session.handle(transcribed("Landed."));
+        assert!(session.view().injected);
+
+        fake.take().stop_error = Some(Failure::new(FailureKind::MicDenied, "mic went away"));
+        press_and_release(&mut session);
+
+        assert!(
+            !session.view().injected,
+            "the old transcript is still on screen, but nothing new landed"
+        );
+        assert!(session.view().attempt.is_some());
+    }
+
+    #[test]
     fn a_recording_that_cannot_be_saved_still_gets_its_text_inserted() {
         let fake = Shared::with_capture(2_000, false);
         fake.take().record_error =
@@ -1213,7 +1382,9 @@ mod tests {
         press_and_release(&mut session);
         let effects = session.handle(Input::Transcript {
             id: None,
-            result: Ok(attempt("Keep these words.")),
+            result: Box::new(Ok(attempt("Keep these words.")),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         assert_eq!(fake.take().injected, vec!["Keep these words.".to_owned()]);
