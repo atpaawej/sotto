@@ -386,8 +386,8 @@ impl Session {
 
     /// Stops the microphone, saves the Recording, and asks the runner to
     /// transcribe it.
-    fn finish(&mut self, _at: Instant) -> Vec<Effect> {
-        self.pipeline_started = Some(Instant::now());
+    fn finish(&mut self, at: Instant) -> Vec<Effect> {
+        self.pipeline_started = Some(at);
         self.history_record_ms = 0;
         self.last.injected = false;
         let captured = match self.ports.capture.stop() {
@@ -548,20 +548,7 @@ impl Session {
                         .take()
                         .map(|started| started.elapsed().as_millis() as u64)
                         .unwrap_or(attempt.timings.total_ms + inject_ms);
-                    let status = if res.is_ok() { "ok" } else { "inject failed" };
-                    devlog::step(
-                        "latency",
-                        format!(
-                            "total={end_to_end_ms}ms ({status}) | stop={}ms encode={}ms save={}ms upload={}ms transcribe={}ms cleanup={}ms inject={inject_ms}ms",
-                            attempt.timings.stop_ms,
-                            attempt.timings.encode_ms,
-                            self.history_record_ms,
-                            attempt.timings.upload_ms,
-                            attempt.timings.provider_ms,
-                            attempt.timings.cleanup_ms,
-                        ),
-                    );
-                    match res {
+                    let outcome = match res {
                         Ok(()) => {
                             devlog::step("inject", format!("pasted successfully in {inject_ms}ms"));
                             (Injection::Inserted, None)
@@ -570,7 +557,29 @@ impl Session {
                             devlog::step("inject", format!("paste failed in {inject_ms}ms: {reason}"));
                             (Injection::Blocked, Some(failure::injection(reason)))
                         }
+                    };
+                    if devlog::enabled() {
+                        let status = if outcome.1.is_none() { "ok" } else { "paste failed" };
+                        let audio_ms = attempt.timings.stop_ms + attempt.timings.encode_ms;
+                        eprintln!(
+                            "\n──────────────────────────────────────────────────\n\
+                             Dictation latency (key release → pasted): {end_to_end_ms} ms ({status})\n\
+                             \x20 • Stop & encode audio : {audio_ms:>5} ms (stop {} ms, encode {} ms)\n\
+                             \x20 • Save recording      : {:>5} ms\n\
+                             \x20 • Upload audio        : {:>5} ms\n\
+                             \x20 • Transcription       : {:>5} ms\n\
+                             \x20 • LLM cleanup         : {:>5} ms\n\
+                             \x20 • Paste (inject)      : {inject_ms:>5} ms\n\
+                             ──────────────────────────────────────────────────",
+                            attempt.timings.stop_ms,
+                            attempt.timings.encode_ms,
+                            self.history_record_ms,
+                            attempt.timings.upload_ms,
+                            attempt.timings.provider_ms,
+                            attempt.timings.cleanup_ms,
+                        );
                     }
+                    outcome
                 } else {
                     self.pipeline_started = None;
                     devlog::step("inject", "skipped (retry-other comparison)");
