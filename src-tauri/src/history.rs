@@ -933,10 +933,12 @@ impl History {
             .get(id)
             .map_err(|error| Failure::storage(&error))?;
         if let Some(entry) = entry {
-            self.remove_recording(&entry)?;
+            // Drop the row first: an orphan WAV is harmless, a row pointing at
+            // a deleted Recording breaks Play and Retry.
             self.store
                 .delete(id)
                 .map_err(|error| Failure::storage(&error))?;
+            self.remove_recording(&entry)?;
         }
         Ok(())
     }
@@ -979,10 +981,10 @@ impl History {
             .before(cutoff)
             .map_err(|error| Failure::storage(&error))?;
         for entry in &expired {
-            self.remove_recording(entry)?;
             self.store
                 .delete(&entry.id)
                 .map_err(|error| Failure::storage(&error))?;
+            self.remove_recording(entry)?;
         }
         Ok(expired.len())
     }
@@ -1509,6 +1511,22 @@ mod tests {
 
         history.delete(&retried).expect("delete second result");
         assert!(!Path::new(&path).exists());
+    }
+
+    #[test]
+    fn retention_keeps_a_shared_recording_for_the_newer_result() {
+        let (_dir, history, original, retried) = two_results();
+        let mut aged = history.entry(&original).expect("original");
+        aged.created_at_ms = 1;
+        history.store.update(&aged).expect("age the row");
+        let path = aged.recording_path.clone();
+
+        history.enforce_retention(Some(30)).expect("retention");
+
+        let remaining = history.list("").expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, retried);
+        assert!(Path::new(&path).exists(), "the retry still owns the Recording");
     }
 
     #[test]
