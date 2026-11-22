@@ -61,32 +61,34 @@ pub async fn serve(
     loaded: Arc<Mutex<Result<Config, String>>>,
     mut retries: UnboundedReceiver<()>,
 ) {
+    let mut bound = false;
     loop {
-        match bind_keyboards(&access, &inbox, Arc::clone(&loaded)) {
-            Ok(()) => {
-                // Keep the task alive so a retry can re-enumerate if needed.
-                if retries.recv().await.is_none() {
-                    return;
+        if !bound {
+            match bind_keyboards(&access, &inbox, Arc::clone(&loaded)) {
+                Ok(()) => {
+                    bound = true;
+                }
+                Err(problem) => {
+                    eprintln!("hotkey: {problem}");
+                    portal::update(&access, |state| {
+                        state.hotkey.bound = false;
+                        state.hotkey.problem = Some(problem.clone());
+                    });
+                    if inbox
+                        .send(Input::CapabilityFailed {
+                            failure: failure::shortcut(problem),
+                        })
+                        .is_err()
+                    {
+                        eprintln!("hotkey: the session stopped accepting failures");
+                    }
                 }
             }
-            Err(problem) => {
-                eprintln!("hotkey: {problem}");
-                portal::update(&access, |state| {
-                    state.hotkey.bound = false;
-                    state.hotkey.problem = Some(problem.clone());
-                });
-                if inbox
-                    .send(Input::CapabilityFailed {
-                        failure: failure::shortcut(problem),
-                    })
-                    .is_err()
-                {
-                    eprintln!("hotkey: the session stopped accepting failures");
-                }
-                if retries.recv().await.is_none() {
-                    return;
-                }
-            }
+        }
+        // Readers already open keep reading the live trigger, so a retry must
+        // not start a second set: one press would become two.
+        if retries.recv().await.is_none() {
+            return;
         }
     }
 }
