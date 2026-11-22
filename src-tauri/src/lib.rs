@@ -16,6 +16,7 @@ mod keyboard;
 mod pill;
 mod portal;
 mod session;
+mod startup;
 mod transcribe;
 
 use std::{
@@ -338,6 +339,16 @@ fn access_status(state: State<'_, AppState>) -> portal::Access {
 }
 
 #[tauri::command]
+fn start_at_login_enabled() -> bool {
+    startup::is_start_at_login_enabled()
+}
+
+#[tauri::command]
+fn set_start_at_login(enabled: bool) -> Result<(), String> {
+    startup::set_start_at_login(enabled)
+}
+
+#[tauri::command]
 fn retry_keyboard_access(state: State<'_, AppState>) -> Result<(), String> {
     state
         .retry_inject
@@ -424,6 +435,8 @@ pub fn run() {
             update_retention,
             access_status,
             retry_keyboard_access,
+            start_at_login_enabled,
+            set_start_at_login,
             open_main_window,
         ])
         .setup(|app| {
