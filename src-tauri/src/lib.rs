@@ -171,7 +171,9 @@ fn update_pill_visibility(
     if visibility == PillVisibility::ActiveOnly && phase == session::Phase::Idle {
         pill::hide(&app);
     }
-    let _ = app.emit("pill://visibility", visibility);
+    if let Err(error) = app.emit("pill://visibility", visibility) {
+        devlog::step("pill", format!("could not emit pill visibility: {error}"));
+    }
     Ok(snapshot)
 }
 

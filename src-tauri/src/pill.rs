@@ -83,15 +83,21 @@ pub fn sync_visibility(app: &AppHandle, visibility: PillVisibility, phase: Phase
     };
     match visibility {
         PillVisibility::Disabled => {
-            let _ = window.hide();
+            if let Err(error) = window.hide() {
+                crate::devlog::step("pill", format!("could not hide pill window: {error}"));
+            }
         }
         PillVisibility::Always => {
-            let _ = window.show();
+            if let Err(error) = window.show() {
+                crate::devlog::step("pill", format!("could not show pill window: {error}"));
+            }
             place(&window);
         }
         PillVisibility::ActiveOnly => {
             if phase != Phase::Idle {
-                let _ = window.show();
+                if let Err(error) = window.show() {
+                    crate::devlog::step("pill", format!("could not show pill window: {error}"));
+                }
                 place(&window);
             }
         }
@@ -101,7 +107,9 @@ pub fn sync_visibility(app: &AppHandle, visibility: PillVisibility, phase: Phase
 /// Hides the pill window after an `ActiveOnly` fade-out completes.
 pub fn hide(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("pill") {
-        let _ = window.hide();
+        if let Err(error) = window.hide() {
+            crate::devlog::step("pill", format!("could not hide pill window: {error}"));
+        }
     }
 }
 

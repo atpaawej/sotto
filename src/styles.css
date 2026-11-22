@@ -425,30 +425,74 @@ body.pill-body {
 }
 
 .pill-body #root {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
   width: 100%;
   height: 100%;
-  padding: 8px;
+  padding: 10px 12px 14px;
+}
+
+.pill-stage {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.pill-tooltip-anchor {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.pill-tooltip {
+  transform-origin: bottom center;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 999px;
+  background: rgb(20 20 19 / 0.96);
+  color: rgb(241 240 235 / 0.92);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    0 4px 12px rgb(0 0 0 / 0.24);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 .pill {
+  position: relative;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   max-width: 356px;
-  padding: 9px 14px;
-  border: 1px solid rgb(241 240 235 / 0.14);
+  padding: 8px 14px;
+  border: 1px solid rgb(255 255 255 / 0.15);
   border-radius: 999px;
-  background: rgb(24 25 22 / 0.94);
+  background: rgb(20 20 19 / 0.96);
   color: #f1f0eb;
   box-shadow:
-    0 1px 2px rgb(0 0 0 / 0.28),
-    0 10px 30px rgb(0 0 0 / 0.26);
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    0 2px 6px rgb(0 0 0 / 0.28),
+    0 8px 18px rgb(0 0 0 / 0.16);
   font-size: 0.8125rem;
-  font-weight: 450;
+  font-weight: 500;
   line-height: 1.35;
   white-space: nowrap;
+  transition:
+    background-color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out),
+    transform 140ms var(--ease-out);
 }
 
 .pill-clickable {
@@ -458,22 +502,23 @@ body.pill-body {
 .pill-row {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
 }
 
 .pill-idle {
-  padding: 6px 13px;
-  opacity: 0.74;
-  background: rgb(24 25 22 / 0.86);
-  transition:
-    opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
-    border-color 180ms cubic-bezier(0.23, 1, 0.32, 1);
+  padding: 6px 12px;
 }
 
-.pill-hover {
-  padding: 8px 14px;
-  opacity: 0.96;
-  border-color: rgb(241 240 235 / 0.22);
+.pill-idle-row {
+  gap: 8px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pill-hover {
+    border-color: rgb(255 255 255 / 0.26);
+    background: rgb(26 26 24 / 0.98);
+    transform: scale(1.03);
+  }
 }
 
 .pill-idle-dot {
@@ -481,19 +526,44 @@ body.pill-body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: rgb(241 240 235 / 0.58);
-  transition: background-color 160ms ease;
+  background: #e4553f;
+  box-shadow: 0 0 0 2px rgb(228 85 63 / 0.22);
+  transition:
+    transform 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out);
 }
 
 .pill-idle-dot-active {
-  background: #e4553f;
+  transform: scale(1.1);
+  box-shadow: 0 0 0 3px rgb(228 85 63 / 0.34);
 }
 
-.pill-idle-bar {
-  width: 26px;
-  height: 3px;
+.pill-idle-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 14px;
+}
+
+.pill-idle-glyph {
+  width: 2px;
   border-radius: 999px;
-  background: rgb(241 240 235 / 0.26);
+  background: rgb(241 240 235 / 0.44);
+  transition: background-color 160ms var(--ease-out);
+}
+
+.pill-hover .pill-idle-glyph {
+  background: rgb(241 240 235 / 0.86);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill,
+  .pill-tooltip,
+  .pill-idle-dot,
+  .pill-idle-glyph {
+    transition: opacity 150ms ease;
+    transform: none;
+  }
 }
 
 .pill-hint-text {
