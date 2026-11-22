@@ -600,12 +600,17 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
 
-            let icon = app.default_window_icon().cloned().ok_or_else(|| {
-                std::io::Error::other("the app has no window icon to reuse for the tray")
-            })?;
+            let app_icon = tauri::include_image!("icons/icon.png");
+            if let Some(main_window) = app.get_webview_window("main") {
+                if let Err(error) = main_window.set_icon(app_icon) {
+                    devlog::step("window", format!("could not set main window icon: {error}"));
+                }
+            }
+
+            let tray_icon = tauri::include_image!("icons/tray.png");
 
             TrayIconBuilder::with_id("sotto")
-                .icon(icon)
+                .icon(tray_icon)
                 .tooltip("Sotto")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
