@@ -51,12 +51,24 @@ pub fn create(app: &AppHandle, visibility: PillVisibility) -> Result<(), String>
 
     #[cfg(target_os = "linux")]
     if let Ok(gtk_win) = window.gtk_window() {
-        use gtk::prelude::GtkWindowExt;
+        use gtk::prelude::{GtkWindowExt, WidgetExt};
         gtk_win.set_accept_focus(false);
         gtk_win.set_focus_on_map(false);
         gtk_win.set_skip_taskbar_hint(true);
         gtk_win.set_skip_pager_hint(true);
         gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Notification);
+        let app_handle = app.clone();
+        gtk_win.connect_leave_notify_event(move |_, event| {
+            if event.detail() != gtk::gdk::NotifyType::Inferior {
+                if let Err(error) = app_handle.emit("pill://pointer-leave", ()) {
+                    crate::devlog::step(
+                        "pill",
+                        format!("could not emit pointer-leave: {error}"),
+                    );
+                }
+            }
+            gtk::glib::Propagation::Proceed
+        });
     }
 
     place(&window);

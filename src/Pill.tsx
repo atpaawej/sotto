@@ -79,6 +79,13 @@ export default function Pill() {
       },
     );
 
+    const unlistenLeave = listen("pill://pointer-leave", () => {
+      setHovered(false);
+    });
+
+    const handleDocLeave = () => setHovered(false);
+    document.addEventListener("mouseleave", handleDocLeave);
+
     const unlistenLevel = listen<number>("dictation://level", (event) => {
       const level = Math.max(0.08, Math.min(1, event.payload));
       setBars((prev) =>
@@ -92,8 +99,10 @@ export default function Pill() {
 
     return () => {
       cancelled = true;
+      document.removeEventListener("mouseleave", handleDocLeave);
       void unlistenState.then((stop) => stop());
       void unlistenVisibility.then((stop) => stop());
+      void unlistenLeave.then((stop) => stop());
       void unlistenLevel.then((stop) => stop());
     };
   }, []);
@@ -213,6 +222,7 @@ export default function Pill() {
           aria-live="polite"
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
+          onPointerLeave={() => setHovered(false)}
           onClick={handlePillClick}
           whileTap={isIdle || isListening ? { scale: 0.97 } : undefined}
           transition={{ duration: 0.12, ease: EASE_OUT }}
