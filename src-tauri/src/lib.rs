@@ -499,7 +499,9 @@ fn start_session(
 
             for effect in work {
                 match effect {
-                    Effect::Transcribe { id, captured } => {
+                    Effect::Transcribe {
+                        id, captured, ..
+                    } => {
                         let loaded = Arc::clone(&loaded);
                         let cleaner = Arc::clone(&shared_cleaner);
                         let reply = effects.clone();

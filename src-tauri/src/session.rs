@@ -518,7 +518,7 @@ impl Session {
         };
 
         match self.ports.history.retry_source(&id) {
-            Ok(RetrySource { captured }) => {
+            Ok(RetrySource { captured, .. }) => {
                 self.state = State::Working { cancelled: false };
                 self.pending_storage_failure = None;
                 self.last.message = None;
@@ -625,7 +625,7 @@ pub fn publish(view: &SharedView, next: View) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictation::Timings;
+    use crate::{config::ProviderId, dictation::Timings};
     use std::{cell::RefCell, rc::Rc};
 
     const ID: &str = "dictation-1";
@@ -756,9 +756,27 @@ mod tests {
             Ok(())
         }
 
-        fn retry_source(&mut self, _id: &str) -> Result<RetrySource, Failure> {
+        fn retry_source(&mut self, id: &str) -> Result<RetrySource, Failure> {
             match self.0.take().retry.clone() {
-                Some(captured) => Ok(RetrySource { captured }),
+                Some(captured) => Ok(RetrySource {
+                    captured,
+                    id: id.to_owned(),
+                    provider: None,
+                }),
+                None => Err(Failure::new(
+                    FailureKind::StorageFailed,
+                    "no recording to retry",
+                )),
+            }
+        }
+
+        fn retry_other(&mut self, id: &str) -> Result<RetrySource, Failure> {
+            match self.0.take().retry.clone() {
+                Some(captured) => Ok(RetrySource {
+                    captured,
+                    id: format!("other-{id}"),
+                    provider: Some(ProviderId::ElevenLabs),
+                }),
                 None => Err(Failure::new(
                     FailureKind::StorageFailed,
                     "no recording to retry",
@@ -1089,7 +1107,7 @@ mod tests {
         let transcribe = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::Transcribe { id, captured } => Some((id, captured)),
+                Effect::Transcribe { id, captured, .. } => Some((id, captured)),
                 Effect::Failed => None,
             })
             .expect("retry transcribes the stored recording");
@@ -1149,7 +1167,7 @@ mod tests {
         let effects = session.handle(Input::Retry { id: None });
         assert!(matches!(
             effects.as_slice(),
-            [Effect::Transcribe { id: Some(retried), captured }]
+            [Effect::Transcribe { id: Some(retried), captured, .. }]
                 if retried == &id && captured.wav == vec![0u8; 4]
         ));
 
