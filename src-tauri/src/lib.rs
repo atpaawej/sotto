@@ -328,6 +328,7 @@ fn dictation_state(state: State<'_, AppState>) -> session::View {
             attempt: None,
             failure: None,
             retry_id: None,
+            injected: false,
         })
 }
 

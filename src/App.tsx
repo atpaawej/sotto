@@ -1087,6 +1087,7 @@ function SpeechSection({
         attempt: null,
         failure: null,
         retryId: null,
+        injected: false,
       });
     } finally {
       setBusy(false);
@@ -1105,6 +1106,7 @@ function SpeechSection({
         attempt: null,
         failure: null,
         retryId: null,
+        injected: false,
       });
     }
   }
@@ -1123,6 +1125,7 @@ function SpeechSection({
         attempt: null,
         failure: null,
         retryId: null,
+        injected: false,
       });
     } finally {
       setRetrying(false);
@@ -1142,6 +1145,7 @@ function SpeechSection({
         attempt: null,
         failure: null,
         retryId: null,
+        injected: false,
       });
     } finally {
       setRetryingDictation(false);

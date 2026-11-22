@@ -138,6 +138,8 @@ export interface DictationState {
   failure: Failure | null;
   /** The Recording Retry would send again, when there is one on disk. */
   retryId: string | null;
+  /** Whether the last attempt's text actually reached the focused app. */
+  injected: boolean;
 }
 
 export type InjectionOutcome = "not_attempted" | "inserted" | "blocked";

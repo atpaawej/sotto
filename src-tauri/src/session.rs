@@ -136,6 +136,10 @@ pub struct View {
     /// The Recording Retry would send again. Absent when there is nothing on
     /// disk to retry.
     pub retry_id: Option<String>,
+    /// Whether the last attempt's text reached the focused app. A cleanup
+    /// warning can follow a successful Injection; this is the unambiguous
+    /// signal the first-run wizard needs.
+    pub injected: bool,
 }
 
 impl View {
@@ -148,6 +152,7 @@ impl View {
             attempt: None,
             failure: None,
             retry_id: None,
+            injected: false,
         }
     }
 }
@@ -186,6 +191,7 @@ struct Last {
     message: Option<String>,
     failure: Option<Failure>,
     retry_id: Option<String>,
+    injected: bool,
     /// What an idle session is showing: nothing, a result, advice, or a failure.
     face: Phase,
 }
@@ -219,6 +225,7 @@ impl Session {
                 message: None,
                 failure: None,
                 retry_id: None,
+                injected: false,
                 face: Phase::Idle,
             },
             pending_storage_failure: None,
@@ -233,6 +240,7 @@ impl Session {
         view.message = self.last.message.clone();
         view.failure = self.last.failure.clone();
         view.retry_id = self.last.retry_id.clone();
+        view.injected = self.last.injected;
 
         match self.state {
             State::Idle => view.phase = self.last.face,
@@ -242,12 +250,14 @@ impl Session {
                 view.message = None;
                 view.failure = None;
                 view.retry_id = None;
+                view.injected = false;
             }
             State::Working { .. } => {
                 view.phase = Phase::Working;
                 view.message = None;
                 view.failure = None;
                 view.retry_id = None;
+                view.injected = false;
             }
         }
         view
@@ -305,6 +315,7 @@ impl Session {
                         self.last.message = None;
                         self.last.failure = None;
                         self.last.retry_id = None;
+                        self.last.injected = false;
                         self.last.face = Phase::Idle;
                         self.pending_storage_failure = None;
                         self.show(None);
@@ -343,6 +354,7 @@ impl Session {
     /// Stops the microphone, saves the Recording, and asks the runner to
     /// transcribe it.
     fn finish(&mut self, _at: Instant) -> Vec<Effect> {
+        self.last.injected = false;
         let captured = match self.ports.capture.stop() {
             Ok(captured) => captured,
             Err(failure) => {
@@ -384,6 +396,7 @@ impl Session {
     }
 
     fn cancel(&mut self) -> Vec<Effect> {
+        self.last.injected = false;
         match self.state {
             State::Idle => Vec::new(),
             State::Listening { .. } => {
@@ -477,6 +490,8 @@ impl Session {
                 } else {
                     (Injection::NotAttempted, None)
                 };
+                // The one unambiguous signal that text reached the focused app.
+                self.last.injected = outcome == Injection::Inserted;
 
                 let history_error = match &id {
                     Some(id) => self
@@ -574,6 +589,7 @@ impl Session {
         self.state = State::Working { cancelled: false };
         self.pending_storage_failure = None;
         self.no_inject_next = source.provider.is_some();
+        self.last.injected = false;
         self.last.message = None;
         self.last.failure = None;
         self.last.retry_id = None;
@@ -598,6 +614,7 @@ impl Session {
         self.last.attempt = None;
         self.last.failure = Some(failure);
         self.last.retry_id = None;
+        self.last.injected = false;
         self.last.face = Phase::Failed;
         if matches!(self.state, State::Idle) {
             self.show(Some(FAILED_VISIBLE));
@@ -1322,6 +1339,7 @@ mod tests {
             Some(FailureKind::InjectionBlocked)
         );
         assert_eq!(session.view().retry_id.as_deref(), Some(ID));
+        assert!(!session.view().injected, "blocked text never landed");
         assert_eq!(
             fake.take().completed,
             vec![(
@@ -1333,6 +1351,25 @@ mod tests {
                 ))
             )]
         );
+    }
+
+    #[test]
+    fn a_successful_injection_is_not_inherited_by_a_later_failure() {
+        let fake = Shared::with_capture(2_000, false);
+        let mut session = session(&fake);
+
+        press_and_release(&mut session);
+        session.handle(transcribed("Landed."));
+        assert!(session.view().injected);
+
+        fake.take().stop_error = Some(Failure::new(FailureKind::MicDenied, "mic went away"));
+        press_and_release(&mut session);
+
+        assert!(
+            !session.view().injected,
+            "the old transcript is still on screen, but nothing new landed"
+        );
+        assert!(session.view().attempt.is_some());
     }
 
     #[test]

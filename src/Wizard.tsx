@@ -69,13 +69,10 @@ export default function Wizard({
   const shown = dictation?.attempt
     ? dictation.attempt.cleaned || dictation.attempt.transcript
     : "";
-  // Text is injected before a cleanup warning is attached. A blocked injection
-  // is the only failed phase that carries a retry id, so this is the proof that
-  // the whole loop works — even when cleanup had no Groq key to run on.
-  const inserted =
-    (phase === "done" || phase === "failed") &&
-    Boolean(shown.trim()) &&
-    !dictation?.retryId;
+  // The session sets this only on the path that actually put text into the
+  // focused app. A cleanup warning after that still counts; a stale attempt or
+  // a blocked injection does not.
+  const inserted = dictation?.injected === true;
 
   function apply(snapshot: ConfigSnapshot) {
     setCurrent(snapshot);
