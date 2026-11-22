@@ -581,6 +581,7 @@ pub fn run() {
                 Arc::clone(&access),
                 inbox.clone(),
                 Arc::clone(&loaded_state),
+                Arc::clone(&view),
                 retry_hotkey_rx,
             ));
 

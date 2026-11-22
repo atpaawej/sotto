@@ -276,7 +276,11 @@ impl Session {
             Input::Press { .. } => devlog::step("trigger", "hotkey press detected"),
             Input::Release { .. } => devlog::step("trigger", "hotkey release detected"),
             Input::Toggle { .. } => devlog::step("trigger", "pill/UI toggle detected"),
-            Input::Cancel => devlog::step("trigger", "cancel requested"),
+            Input::Cancel => {
+                if !matches!(self.state, State::Idle) {
+                    devlog::step("trigger", "cancel requested");
+                }
+            }
             Input::Retry { id } => devlog::step(
                 "trigger",
                 format!("retry requested (id={})", id.as_deref().unwrap_or("last")),
