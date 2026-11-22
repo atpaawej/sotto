@@ -3,10 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 import {
   asFailure,
   cancelDictation,
+  checkForUpdates,
   copyHistory,
   deleteAllHistory,
   deleteHistory,
   DICTATION_EVENT,
+  injectorLabel,
+  installUpdate,
   keyLabel,
   otherProvider,
   providerLabel,
@@ -21,6 +24,8 @@ import {
   retryHistory,
   retryHistoryOther,
   retryKeyboardAccess,
+  setStartAtLogin,
+  startAtLoginEnabled,
   testProvider,
   toggleDictation,
   updateCleanup,
@@ -38,6 +43,7 @@ import {
   type Failure,
   type HistoryEntry,
   type ProviderId,
+  type UpdateStatus,
 } from "./lib/api";
 import Wizard from "./Wizard";
 
@@ -195,45 +201,7 @@ function Section({
 
   switch (id) {
     case "general":
-      return (
-        <section className="section">
-          <h1 className="section-title">General</h1>
-          <p className="section-deck">
-            How dictation starts, and where the rest of these settings live.
-          </p>
-          {snapshot ? (
-            <dl className="rows">
-              <Row
-                label="Trigger key"
-                value={
-                  access?.hotkey.trigger ?? keyLabel(snapshot.config.trigger_key)
-                }
-                hint={
-                  access?.hotkey.bound
-                    ? "Hold to dictate anywhere. Double-tap to lock it on."
-                    : "Not bound yet — Speech says what went wrong."
-                }
-              />
-              <Row
-                label="Provider"
-                value={providerLabel(snapshot.config.active_provider)}
-                hint="Only the provider you pick receives your audio."
-              />
-              <Row
-                label="Settings file"
-                value={<span className="mono">{snapshot.path}</span>}
-                hint={
-                  snapshot.mode === "600"
-                    ? "Mode 600. Only your user account can read it."
-                    : `Mode ${snapshot.mode}.`
-                }
-              />
-            </dl>
-          ) : (
-            <p className="quiet">Settings are not available.</p>
-          )}
-        </section>
-      );
+      return <GeneralSection snapshot={snapshot} access={access} />;
 
     case "speech":
       return (
@@ -259,22 +227,7 @@ function Section({
       return <HistorySection snapshot={snapshot} onSnapshot={onSnapshot} />;
 
     case "about":
-      return (
-        <section className="section">
-          <h1 className="section-title">About</h1>
-          <p className="section-deck">
-            Sotto is open source, and the only computer it talks to is the speech
-            provider you chose.
-          </p>
-          {info && (
-            <dl className="rows">
-              <Row label="Version" value={<span>{info.version}</span>} />
-              <Row label="License" value={info.license} />
-              <Row label="Source" value={<span className="mono">{info.repository}</span>} />
-            </dl>
-          )}
-        </section>
-      );
+      return <AboutSection info={info} />;
   }
 }
 
@@ -295,6 +248,193 @@ function Row({
         {hint && <p className="row-hint">{hint}</p>}
       </dd>
     </div>
+  );
+}
+
+function GeneralSection({
+  snapshot,
+  access,
+}: {
+  snapshot?: ConfigSnapshot;
+  access: Access | null;
+}) {
+  const [atLogin, setAtLogin] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    startAtLoginEnabled().then((enabled) => {
+      if (!cancelled) setAtLogin(enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function toggleAtLogin() {
+    const next = !atLogin;
+    setAtLogin(next);
+    try {
+      await setStartAtLogin(next);
+    } catch {
+      // The desktop state is the source of truth, so the switch just goes back.
+      setAtLogin(!next);
+    }
+  }
+
+  const injector = access?.injection.active || null;
+
+  return (
+    <section className="section">
+      <h1 className="section-title">General</h1>
+      <p className="section-deck">
+        How dictation starts, and where the rest of these settings live.
+      </p>
+      {snapshot ? (
+        <dl className="rows">
+          <Row
+            label="Trigger key"
+            value={
+              access?.hotkey.trigger ?? keyLabel(snapshot.config.trigger_key)
+            }
+            hint={
+              access?.hotkey.bound
+                ? "Hold to dictate anywhere. Double-tap to lock it on."
+                : "Not bound yet — Speech says what went wrong."
+            }
+          />
+          <Row
+            label="Start at login"
+            value={
+              <button
+                type="button"
+                className="button button-quiet toggle-button"
+                aria-pressed={atLogin}
+                onClick={() => void toggleAtLogin()}
+              >
+                {atLogin ? "On" : "Off"}
+              </button>
+            }
+            hint="The app opens when you log in."
+          />
+          <Row
+            label="Injector"
+            value={injector ? injectorLabel(injector) : "None"}
+            hint={
+              access?.injection.reason || access?.injection.problem || undefined
+            }
+          />
+          <Row
+            label="Provider"
+            value={providerLabel(snapshot.config.active_provider)}
+            hint="Only the provider you pick receives your audio."
+          />
+          <Row
+            label="Settings file"
+            value={<span className="mono">{snapshot.path}</span>}
+            hint={
+              snapshot.mode === "600"
+                ? "Mode 600. Only your user account can read it."
+                : `Mode ${snapshot.mode}.`
+            }
+          />
+        </dl>
+      ) : (
+        <p className="quiet">Settings are not available.</p>
+      )}
+    </section>
+  );
+}
+
+type UpdatesState =
+  | { status: "checking" }
+  | { status: "up-to-date" }
+  | { status: "available"; latest: string }
+  | { status: "error" }
+  | { status: "installed" };
+
+function updatesState(status: UpdateStatus): UpdatesState {
+  if (!status.available) return { status: "up-to-date" };
+  return { status: "available", latest: status.latest ?? "" };
+}
+
+function AboutSection({ info }: { info?: AppInfo }) {
+  const [state, setState] = useState<UpdatesState>({ status: "checking" });
+  const [installing, setInstalling] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    checkForUpdates().then(
+      (status) => {
+        if (!cancelled) setState(updatesState(status));
+      },
+      () => {
+        if (!cancelled) setState({ status: "error" });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function install() {
+    setInstalling(true);
+    try {
+      await installUpdate();
+      setState({ status: "installed" });
+    } catch {
+      setState({ status: "error" });
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  const text: Record<UpdatesState["status"], string> = {
+    checking: "Checking…",
+    "up-to-date": "Up to date",
+    available: "Update available",
+    error: "Could not check for updates.",
+    installed: "Update installed",
+  };
+
+  const hint =
+    state.status === "available"
+      ? `Version ${state.latest} is out.`
+      : state.status === "installed"
+        ? "Restart Sotto to use it."
+        : undefined;
+
+  return (
+    <section className="section">
+      <h1 className="section-title">About</h1>
+      <p className="section-deck">
+        Sotto is open source, and the only computer it talks to is the speech
+        provider you chose.
+      </p>
+      {info ? (
+        <dl className="rows">
+          <Row label="Version" value={<span>{info.version}</span>} />
+          <Row label="License" value={info.license} />
+          <Row label="Source" value={<span className="mono">{info.repository}</span>} />
+          <div className="row">
+            <dt className="row-label">Updates</dt>
+            <dd className="row-value">
+              <p>{text[state.status]}</p>
+              {hint && <p className="row-hint">{hint}</p>}
+              {state.status === "available" && (
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => void install()}
+                  disabled={installing}
+                >
+                  {installing ? "Installing…" : "Install update"}
+                </button>
+              )}
+            </dd>
+          </div>
+        </dl>
+      ) : null}
+    </section>
   );
 }
 
