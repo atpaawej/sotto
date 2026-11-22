@@ -59,3 +59,7 @@ _Avoid_: error message, exception, problem string
 **Retry**:
 Sending a stored Recording to the provider again, without asking the user to speak.
 _Avoid_: redo, try again (the UI label may say Retry, the act is retry)
+
+**Insights**:
+Local productivity metrics computed from History — words dictated, speaking pace (WPM), estimated time saved, daily streaks, Cleanup impact, and provider latency.
+_Avoid_: telemetry, analytics (when referring to the UI view)
