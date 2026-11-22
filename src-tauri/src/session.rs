@@ -202,6 +202,9 @@ pub struct Session {
     /// While a transcription runs, presses from before it finished are late
     /// echoes of a busy app and must not start dictation.
     busy_until: Option<Instant>,
+    /// A retry with the other provider compares results in History; it must
+    /// not paste the second result into the focused app.
+    no_inject_next: bool,
 }
 
 impl Session {
@@ -220,6 +223,7 @@ impl Session {
             },
             pending_storage_failure: None,
             busy_until: None,
+            no_inject_next: false,
         }
     }
 
@@ -406,6 +410,8 @@ impl Session {
         result: Box<Result<Attempt, Failure>>,
         provider: Option<ProviderId>,
     ) -> Vec<Effect> {
+        let inject = !self.no_inject_next;
+        self.no_inject_next = false;
         let cancelled = match self.state {
             State::Working { cancelled } => cancelled,
             // A reply that arrives after a cancel is stale by definition.
@@ -461,56 +467,56 @@ impl Session {
                     return self.hint("No words came back");
                 }
 
-                match self.ports.injector.inject(&text) {
-                    Ok(()) => {
-                        let history_error = match &id {
-                            Some(id) => self
-                                .ports
-                                .history
-                                .complete(id, &attempt, Injection::Inserted, None)
-                                .err(),
-                            None => None,
-                        };
-                        let warning = attempt
-                            .cleanup_failure
-                            .clone()
-                            .or_else(|| self.pending_storage_failure.take())
-                            .or(history_error);
-                        self.last.attempt = Some(attempt);
-
-                        if let Some(warning) = warning {
-                            // The text already landed, so Retry would insert it
-                            // a second time. The warning is worth showing, but
-                            // it is not a retryable dictation.
-                            return self.fail(warning, None, Some(FAILED_VISIBLE));
+                let (outcome, injection_failure) = if inject {
+                    match self.ports.injector.inject(&text) {
+                        Ok(()) => (Injection::Inserted, None),
+                        Err(reason) => {
+                            (Injection::Blocked, Some(failure::injection(reason)))
                         }
+                    }
+                } else {
+                    (Injection::NotAttempted, None)
+                };
 
-                        self.last.message = None;
-                        self.last.failure = None;
-                        self.last.retry_id = None;
-                        self.last.face = Phase::Done;
-                        self.show(Some(DONE_VISIBLE));
-                        Vec::new()
-                    }
-                    Err(reason) => {
-                        let failure = failure::injection(reason);
-                        let history_error = match &id {
-                            Some(id) => self
-                                .ports
-                                .history
-                                .complete(id, &attempt, Injection::Blocked, Some(&failure))
-                                .err(),
-                            None => None,
-                        };
-                        let failure = match history_error {
-                            Some(error) => merge_history_failure(failure, error),
-                            None => failure,
-                        };
-                        self.last.attempt = Some(attempt);
-                        let retry_id = id.clone();
-                        self.fail(failure, retry_id, Some(FAILED_VISIBLE))
-                    }
+                let history_error = match &id {
+                    Some(id) => self
+                        .ports
+                        .history
+                        .complete(id, &attempt, outcome, injection_failure.as_ref())
+                        .err(),
+                    None => None,
+                };
+
+                if let Some(injection_failure) = injection_failure {
+                    let failure = match history_error {
+                        Some(error) => merge_history_failure(injection_failure, error),
+                        None => injection_failure,
+                    };
+                    self.last.attempt = Some(attempt);
+                    let retry_id = id.clone();
+                    return self.fail(failure, retry_id, Some(FAILED_VISIBLE));
                 }
+
+                let warning = attempt
+                    .cleanup_failure
+                    .clone()
+                    .or_else(|| self.pending_storage_failure.take())
+                    .or(history_error);
+                self.last.attempt = Some(attempt);
+
+                if let Some(warning) = warning {
+                    // The text already landed, so Retry would insert it a
+                    // second time. The warning is worth showing, but it is not
+                    // a retryable dictation.
+                    return self.fail(warning, None, Some(FAILED_VISIBLE));
+                }
+
+                self.last.message = None;
+                self.last.failure = None;
+                self.last.retry_id = None;
+                self.last.face = Phase::Done;
+                self.show(Some(DONE_VISIBLE));
+                Vec::new()
             }
             Err(failure) => {
                 let history_error = match &id {
@@ -567,6 +573,7 @@ impl Session {
     fn start_retry(&mut self, source: RetrySource) -> Vec<Effect> {
         self.state = State::Working { cancelled: false };
         self.pending_storage_failure = None;
+        self.no_inject_next = source.provider.is_some();
         self.last.message = None;
         self.last.failure = None;
         self.last.retry_id = None;
@@ -1213,9 +1220,15 @@ mod tests {
             provider: Some(ProviderId::ElevenLabs),
         });
 
+        let snapshot = fake.take();
+        assert_eq!(snapshot.injected, vec!["First provider.".to_owned()]);
         assert_eq!(
-            fake.take().injected,
-            vec!["First provider.".to_owned(), "Second provider.".to_owned()]
+            snapshot.completed,
+            vec![
+                (ID.to_owned(), Injection::Inserted, None),
+                ("other-dictation-1".to_owned(), Injection::NotAttempted, None),
+            ],
+            "the other provider's result is kept in History, not pasted"
         );
     }
 
