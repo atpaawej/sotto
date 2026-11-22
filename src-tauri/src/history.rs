@@ -11,6 +11,7 @@
 //! the sentence.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{self, Write as _},
     path::{Path, PathBuf},
@@ -23,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{describe, ProviderId},
-    dictation::{Attempt, Captured},
+    dictation::{Attempt, Captured, Timings},
     failure::{Failure, FailureKind},
     transcribe::model_for,
 };
@@ -76,6 +77,7 @@ pub struct Entry {
     /// lives here: the text landed, but the user should know what happened.
     pub failure: Option<Failure>,
     pub recording_path: String,
+    pub timings: Option<Timings>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -249,7 +251,7 @@ impl DictationStore for MemoryStore {
     }
 }
 
-const COLUMNS: &str = "id, created_at_ms, finished_at_ms, duration_ms, provider, model, transcript, cleaned, injection, failure_kind, failure_detail, failure_cause, recording_path";
+const COLUMNS: &str = "id, created_at_ms, finished_at_ms, duration_ms, provider, model, transcript, cleaned, injection, failure_kind, failure_detail, failure_cause, recording_path, stop_ms, encode_ms, upload_ms, provider_ms, cleanup_ms, total_ms";
 
 /// The durable adapter. One connection behind a mutex is enough for a desktop
 /// app that writes once per dictation.
@@ -308,7 +310,13 @@ impl SqliteStore {
                      failure_kind TEXT,
                      failure_detail TEXT,
                      failure_cause TEXT,
-                     recording_path TEXT NOT NULL
+                     recording_path TEXT NOT NULL,
+                     stop_ms INTEGER,
+                     encode_ms INTEGER,
+                     upload_ms INTEGER,
+                     provider_ms INTEGER,
+                     cleanup_ms INTEGER,
+                     total_ms INTEGER
                  );
                  CREATE INDEX IF NOT EXISTS dictations_created_at
                      ON dictations (created_at_ms DESC);",
@@ -317,6 +325,7 @@ impl SqliteStore {
                 path: path.to_path_buf(),
                 source,
             })?;
+        migrate_timing_columns(&connection, path)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -332,8 +341,8 @@ impl DictationStore for SqliteStore {
         let connection = self.lock()?;
         connection
             .execute(
-                "INSERT INTO dictations (id, created_at_ms, finished_at_ms, duration_ms, provider, model, transcript, cleaned, injection, failure_kind, failure_detail, failure_cause, recording_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO dictations (id, created_at_ms, finished_at_ms, duration_ms, provider, model, transcript, cleaned, injection, failure_kind, failure_detail, failure_cause, recording_path, stop_ms, encode_ms, upload_ms, provider_ms, cleanup_ms, total_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 rusqlite::params![
                     entry.id,
                     entry.created_at_ms as i64,
@@ -348,6 +357,12 @@ impl DictationStore for SqliteStore {
                     entry.failure.as_ref().map(|failure| failure.detail.as_str()),
                     entry.failure.as_ref().and_then(|failure| failure.cause.as_deref()),
                     entry.recording_path,
+                    entry.timings.map(|t| t.stop_ms as i64),
+                    entry.timings.map(|t| t.encode_ms as i64),
+                    entry.timings.map(|t| t.upload_ms as i64),
+                    entry.timings.map(|t| t.provider_ms as i64),
+                    entry.timings.map(|t| t.cleanup_ms as i64),
+                    entry.timings.map(|t| t.total_ms as i64),
                 ],
             )
             .map(|_| ())
@@ -371,7 +386,9 @@ impl DictationStore for SqliteStore {
                  SET created_at_ms = ?2, finished_at_ms = ?3, duration_ms = ?4,
                      provider = ?5, model = ?6, transcript = ?7, cleaned = ?8,
                      injection = ?9, failure_kind = ?10, failure_detail = ?11,
-                     failure_cause = ?12, recording_path = ?13
+                     failure_cause = ?12, recording_path = ?13,
+                     stop_ms = ?14, encode_ms = ?15, upload_ms = ?16,
+                     provider_ms = ?17, cleanup_ms = ?18, total_ms = ?19
                  WHERE id = ?1",
                 rusqlite::params![
                     entry.id,
@@ -393,6 +410,12 @@ impl DictationStore for SqliteStore {
                         .as_ref()
                         .and_then(|failure| failure.cause.as_deref()),
                     entry.recording_path,
+                    entry.timings.map(|t| t.stop_ms as i64),
+                    entry.timings.map(|t| t.encode_ms as i64),
+                    entry.timings.map(|t| t.upload_ms as i64),
+                    entry.timings.map(|t| t.provider_ms as i64),
+                    entry.timings.map(|t| t.cleanup_ms as i64),
+                    entry.timings.map(|t| t.total_ms as i64),
                 ],
             )
             .map_err(|source| StoreError::Write { source })?;
@@ -518,6 +541,32 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         }
     };
 
+    let timings = match (
+        row.get::<_, Option<i64>>(13)?,
+        row.get::<_, Option<i64>>(14)?,
+        row.get::<_, Option<i64>>(15)?,
+        row.get::<_, Option<i64>>(16)?,
+        row.get::<_, Option<i64>>(17)?,
+        row.get::<_, Option<i64>>(18)?,
+    ) {
+        (
+            Some(stop_ms),
+            Some(encode_ms),
+            Some(upload_ms),
+            Some(provider_ms),
+            Some(cleanup_ms),
+            Some(total_ms),
+        ) => Some(Timings {
+            stop_ms: stop_ms as u64,
+            encode_ms: encode_ms as u64,
+            upload_ms: upload_ms as u64,
+            provider_ms: provider_ms as u64,
+            cleanup_ms: cleanup_ms as u64,
+            total_ms: total_ms as u64,
+        }),
+        _ => None,
+    };
+
     Ok(Entry {
         id: row.get(0)?,
         created_at_ms: row.get::<_, i64>(1)? as u64,
@@ -530,7 +579,47 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         injection,
         failure,
         recording_path: row.get(12)?,
+        timings,
     })
+}
+
+fn migrate_timing_columns(connection: &rusqlite::Connection, path: &Path) -> Result<(), StoreError> {
+    let mut stmt = connection
+        .prepare("PRAGMA table_info(dictations)")
+        .map_err(|source| StoreError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let existing: BTreeSet<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|source| StoreError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .collect::<Result<_, _>>()
+        .map_err(|source| StoreError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    for col in [
+        "stop_ms",
+        "encode_ms",
+        "upload_ms",
+        "provider_ms",
+        "cleanup_ms",
+        "total_ms",
+    ] {
+        if !existing.contains(col) {
+            connection
+                .execute(&format!("ALTER TABLE dictations ADD COLUMN {col} INTEGER"), [])
+                .map_err(|source| StoreError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
+    }
+    Ok(())
 }
 
 /// The WAVs that sit beside the rows. Files are named by the dictation id, so
@@ -744,6 +833,7 @@ impl History {
             injection: Injection::NotAttempted,
             failure: None,
             recording_path: path.display().to_string(),
+            timings: None,
         };
 
         if let Err(error) = self.store.insert(&entry) {
@@ -789,6 +879,7 @@ impl History {
         entry.injection = injection;
         entry.finished_at_ms = Some(now_ms().map_err(|error| Failure::storage(&error))?);
         entry.failure = failure.cloned().or_else(|| attempt.cleanup_failure.clone());
+        entry.timings = Some(attempt.timings);
 
         self.store
             .update(&entry)
@@ -883,6 +974,7 @@ impl History {
             injection: Injection::NotAttempted,
             failure: None,
             recording_path: entry.recording_path.clone(),
+            timings: None,
         };
         self.store
             .insert(&retried)
@@ -925,6 +1017,19 @@ impl History {
         self.store
             .list(query)
             .map_err(|error| Failure::storage(&error))
+    }
+
+    pub fn insights(
+        &self,
+        range: InsightsRange,
+        tz_offset_minutes: i32,
+    ) -> Result<InsightsSnapshot, Failure> {
+        let entries = self
+            .store
+            .list("")
+            .map_err(|error| Failure::storage(&error))?;
+        let now = now_ms().map_err(|error| Failure::storage(&error))?;
+        Ok(compute_insights(&entries, range, now, tz_offset_minutes))
     }
 
     pub fn delete(&self, id: &str) -> Result<(), Failure> {
@@ -1120,6 +1225,7 @@ mod tests {
             injection: Injection::Inserted,
             failure: None,
             recording_path: format!("/tmp/{id}.wav"),
+            timings: None,
         }
     }
 
@@ -1551,5 +1657,333 @@ mod tests {
         let error = history.retry_other(&stored.id).expect_err("no provider");
 
         assert!(error.detail.contains("no known provider"));
+    }
+
+    #[test]
+    fn insights_aggregates_words_wpm_streaks_and_timings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sqlite = SqliteStore::open(&dir.path().join("history.sqlite3")).expect("open");
+        let day_ms: u64 = 86_400_000;
+        let now = 20_000 * day_ms + 3_600_000; // day 20_000
+
+        let mut e1 = entry("e1", now - day_ms, "um hello world foo bar");
+        e1.provider = "groq".to_owned();
+        e1.duration_ms = 10_000; // 10s
+        e1.cleaned = "Hello world foo bar.".to_owned(); // 4 words
+        e1.injection = Injection::Inserted;
+        e1.timings = Some(Timings {
+            stop_ms: 2,
+            encode_ms: 8,
+            upload_ms: 30,
+            provider_ms: 400,
+            cleanup_ms: 100,
+            total_ms: 540,
+        });
+
+        let mut e2 = entry("e2", now, "testing one two three four five six seven");
+        e2.provider = "groq".to_owned();
+        e2.duration_ms = 20_000; // 20s
+        e2.cleaned = "Testing one two three four five six seven.".to_owned(); // 8 words
+        e2.injection = Injection::Inserted;
+        e2.timings = Some(Timings {
+            stop_ms: 4,
+            encode_ms: 12,
+            upload_ms: 50,
+            provider_ms: 600,
+            cleanup_ms: 140,
+            total_ms: 806,
+        });
+
+        let mut e3 = entry("e3", now - 15 * day_ms, "");
+        e3.provider = "eleven_labs".to_owned();
+        e3.duration_ms = 5_000;
+        e3.cleaned = String::new();
+        e3.injection = Injection::NotAttempted;
+        e3.failure = Some(Failure::new(FailureKind::Network, "offline".to_owned()));
+
+        sqlite.insert(&e1).expect("insert e1");
+        sqlite.insert(&e2).expect("insert e2");
+        sqlite.insert(&e3).expect("insert e3");
+
+        let loaded = sqlite.get("e1").expect("get e1").expect("some e1");
+        assert_eq!(loaded.timings, e1.timings);
+
+        let entries = sqlite.list("").expect("list");
+        let seven_days = compute_insights(&entries, InsightsRange::SevenDays, now, 0);
+        assert_eq!(seven_days.total_dictations, 2);
+        assert_eq!(seven_days.inserted_count, 2);
+        assert_eq!(seven_days.total_words, 12);
+        assert_eq!(seven_days.words_trimmed, 1);
+        assert_eq!(seven_days.avg_wpm, 24); // 12 words in 30s = 24 WPM
+        assert_eq!(seven_days.current_streak_days, 2);
+        assert_eq!(seven_days.longest_streak_days, 2);
+        assert_eq!(seven_days.by_provider.len(), 1);
+        assert_eq!(seven_days.by_provider[0].avg_total_ms, Some(673));
+
+        let all = compute_insights(&entries, InsightsRange::All, now, 0);
+        assert_eq!(all.total_dictations, 3);
+        assert_eq!(all.failed_count, 1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InsightsRange {
+    #[serde(rename = "7d")]
+    SevenDays,
+    #[serde(rename = "30d")]
+    ThirtyDays,
+    #[serde(rename = "all")]
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyActivity {
+    pub date: String,
+    pub count: u64,
+    pub words: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInsight {
+    pub provider: String,
+    pub count: u64,
+    pub avg_total_ms: Option<u64>,
+    pub avg_provider_ms: Option<u64>,
+    pub avg_encode_ms: Option<u64>,
+    pub avg_upload_ms: Option<u64>,
+    pub avg_cleanup_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightsSnapshot {
+    pub total_dictations: u64,
+    pub inserted_count: u64,
+    pub blocked_count: u64,
+    pub failed_count: u64,
+    pub total_words: u64,
+    pub raw_words: u64,
+    pub words_trimmed: u64,
+    pub total_speaking_ms: u64,
+    pub avg_wpm: u64,
+    pub estimated_time_saved_ms: u64,
+    pub current_streak_days: u64,
+    pub longest_streak_days: u64,
+    pub daily_activity: Vec<DailyActivity>,
+    pub by_provider: Vec<ProviderInsight>,
+}
+
+fn word_count(text: &str) -> u64 {
+    text.split_whitespace().count() as u64
+}
+
+fn local_day_index(ts_ms: u64, tz_offset_minutes: i32) -> i64 {
+    let local_ms = (ts_ms as i64).saturating_sub(i64::from(tz_offset_minutes) * 60_000);
+    local_ms.div_euclid(86_400_000)
+}
+
+/// Converts a Unix day index (days since 1970-01-01) to `YYYY-MM-DD`.
+fn day_index_to_ymd(day: i64) -> String {
+    let z = day + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    format!("{year:04}-{m:02}-{d:02}")
+}
+
+fn compute_streaks(active_days: &BTreeSet<i64>, today: i64) -> (u64, u64) {
+    if active_days.is_empty() {
+        return (0, 0);
+    }
+    let mut longest = 0u64;
+    let mut run = 0u64;
+    let mut prev: Option<i64> = None;
+    for &day in active_days {
+        run = match prev {
+            Some(p) if day == p + 1 => run + 1,
+            _ => 1,
+        };
+        if run > longest {
+            longest = run;
+        }
+        prev = Some(day);
+    }
+
+    let anchor = if active_days.contains(&today) {
+        Some(today)
+    } else if active_days.contains(&(today - 1)) {
+        Some(today - 1)
+    } else {
+        None
+    };
+
+    let mut current = 0u64;
+    if let Some(mut day) = anchor {
+        while active_days.contains(&day) {
+            current += 1;
+            day -= 1;
+        }
+    }
+    (current, longest)
+}
+
+#[derive(Default)]
+struct ProviderAccum {
+    count: u64,
+    timed_count: u64,
+    total_ms: u64,
+    provider_ms: u64,
+    encode_ms: u64,
+    upload_ms: u64,
+    cleanup_ms: u64,
+}
+
+pub fn compute_insights(
+    entries: &[Entry],
+    range: InsightsRange,
+    now_ms: u64,
+    tz_offset_minutes: i32,
+) -> InsightsSnapshot {
+    let today = local_day_index(now_ms, tz_offset_minutes);
+    let cutoff_ms = match range {
+        InsightsRange::SevenDays => Some(now_ms.saturating_sub(7 * 86_400_000)),
+        InsightsRange::ThirtyDays => Some(now_ms.saturating_sub(30 * 86_400_000)),
+        InsightsRange::All => None,
+    };
+
+    let mut all_active_days = BTreeSet::new();
+    let mut daily_map: BTreeMap<i64, (u64, u64)> = BTreeMap::new();
+    let mut provider_map: BTreeMap<String, ProviderAccum> = BTreeMap::new();
+
+    let mut total_dictations = 0u64;
+    let mut inserted_count = 0u64;
+    let mut blocked_count = 0u64;
+    let mut failed_count = 0u64;
+    let mut total_words = 0u64;
+    let mut raw_words = 0u64;
+    let mut words_trimmed = 0u64;
+    let mut total_speaking_ms = 0u64;
+
+    for entry in entries {
+        let day = local_day_index(entry.created_at_ms, tz_offset_minutes);
+        let effective_text = if entry.cleaned.trim().is_empty() {
+            entry.transcript.as_str()
+        } else {
+            entry.cleaned.as_str()
+        };
+        let words = word_count(effective_text);
+        if words > 0 {
+            all_active_days.insert(day);
+        }
+
+        if let Some(cutoff) = cutoff_ms {
+            if entry.created_at_ms < cutoff {
+                continue;
+            }
+        }
+
+        total_dictations += 1;
+        match entry.injection {
+            Injection::Inserted => inserted_count += 1,
+            Injection::Blocked => blocked_count += 1,
+            Injection::NotAttempted => {}
+        }
+        if entry.failure.is_some() {
+            failed_count += 1;
+        }
+
+        let transcript_words = word_count(&entry.transcript);
+        let cleaned_words = word_count(&entry.cleaned);
+        total_words += words;
+        raw_words += transcript_words;
+        if transcript_words > 0 && cleaned_words > 0 {
+            words_trimmed += transcript_words.saturating_sub(cleaned_words);
+        }
+        if words > 0 {
+            total_speaking_ms += entry.duration_ms;
+        }
+
+        let daily = daily_map.entry(day).or_insert((0, 0));
+        daily.0 += 1;
+        daily.1 += words;
+
+        if !entry.provider.is_empty() {
+            let acc = provider_map.entry(entry.provider.clone()).or_default();
+            acc.count += 1;
+            if let Some(t) = entry.timings {
+                acc.timed_count += 1;
+                acc.total_ms += t.total_ms;
+                acc.provider_ms += t.provider_ms;
+                acc.encode_ms += t.encode_ms;
+                acc.upload_ms += t.upload_ms;
+                acc.cleanup_ms += t.cleanup_ms;
+            }
+        }
+    }
+
+    let (current_streak_days, longest_streak_days) = compute_streaks(&all_active_days, today);
+    let avg_wpm = if total_speaking_ms > 0 {
+        (total_words * 60_000) / total_speaking_ms
+    } else {
+        0
+    };
+    // Baseline typing speed: 40 WPM = 1,500 ms per word.
+    let estimated_time_saved_ms = (total_words * 1_500).saturating_sub(total_speaking_ms);
+
+    let daily_activity = daily_map
+        .into_iter()
+        .map(|(day, (count, words))| DailyActivity {
+            date: day_index_to_ymd(day),
+            count,
+            words,
+        })
+        .collect();
+
+    let by_provider = provider_map
+        .into_iter()
+        .map(|(provider, acc)| {
+            let avg = |sum: u64| {
+                if acc.timed_count > 0 {
+                    Some(sum / acc.timed_count)
+                } else {
+                    None
+                }
+            };
+            ProviderInsight {
+                provider,
+                count: acc.count,
+                avg_total_ms: avg(acc.total_ms),
+                avg_provider_ms: avg(acc.provider_ms),
+                avg_encode_ms: avg(acc.encode_ms),
+                avg_upload_ms: avg(acc.upload_ms),
+                avg_cleanup_ms: avg(acc.cleanup_ms),
+            }
+        })
+        .collect();
+
+    InsightsSnapshot {
+        total_dictations,
+        inserted_count,
+        blocked_count,
+        failed_count,
+        total_words,
+        raw_words,
+        words_trimmed,
+        total_speaking_ms,
+        avg_wpm,
+        estimated_time_saved_ms,
+        current_streak_days,
+        longest_streak_days,
+        daily_activity,
+        by_provider,
     }
 }

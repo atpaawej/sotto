@@ -305,6 +305,18 @@ fn history_list(state: State<'_, AppState>, query: String) -> Result<Vec<Entry>,
 }
 
 #[tauri::command]
+fn history_insights(
+    state: State<'_, AppState>,
+    range: history::InsightsRange,
+    tz_offset_minutes: i32,
+) -> Result<history::InsightsSnapshot, String> {
+    state
+        .history
+        .insights(range, tz_offset_minutes)
+        .map_err(fail)
+}
+
+#[tauri::command]
 fn history_retry(state: State<'_, AppState>, id: String) -> Result<(), String> {
     send(&state, Input::Retry { id: Some(id) })
 }
@@ -513,6 +525,7 @@ pub fn run() {
             dictation_retry,
             dictation_state,
             history_list,
+            history_insights,
             history_retry,
             history_retry_other,
             history_copy,
