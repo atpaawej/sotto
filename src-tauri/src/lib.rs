@@ -272,7 +272,7 @@ fn update_trigger_key(
     key: String,
 ) -> Result<ConfigSnapshot, String> {
     let key = key.trim().to_owned();
-    hotkey::key_from_name(&key)?;
+    hotkey::keys_from_spec(&key)?;
     let snapshot = mutate_config(&state, |config| {
         config.trigger_key = key.clone();
     })?;
