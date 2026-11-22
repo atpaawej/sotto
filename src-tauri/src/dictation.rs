@@ -148,21 +148,17 @@ impl Dictation {
     #[cfg(test)]
     pub fn transcribe(config: &Config, captured: &Captured) -> Result<Attempt, DictationError> {
         match GroqCleaner::new() {
-            Ok(cleaner) => Self::transcribe_with_cleaner(config, captured, Some(&cleaner)),
+            Ok(cleaner) => Self::transcribe_with(
+                config,
+                captured,
+                config.active_provider,
+                Some(&cleaner),
+            ),
             Err(err) => {
                 eprintln!("cleanup client init failed: {}", describe(&err));
-                Self::transcribe_with_cleaner(config, captured, None)
+                Self::transcribe_with(config, captured, config.active_provider, None)
             }
         }
-    }
-
-    /// Runs transcription and optional cleanup with a reusable [`GroqCleaner`] for connection pooling.
-    pub fn transcribe_with_cleaner(
-        config: &Config,
-        captured: &Captured,
-        cleaner: Option<&dyn Cleaner>,
-    ) -> Result<Attempt, DictationError> {
-        Self::transcribe_with(config, captured, config.active_provider, cleaner)
     }
 
     /// Transcribes a Recording with a chosen provider. Normal dictations use
@@ -538,7 +534,6 @@ mod tests {
             providers: crate::config::Providers {
                 elevenlabs_key: Some("xi-test".to_owned()),
                 groq_key: Some("gsk-test".to_owned()),
-                ..Default::default()
             },
             ..Default::default()
         };

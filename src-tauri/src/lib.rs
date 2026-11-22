@@ -24,9 +24,9 @@ use std::{
     time::Instant,
 };
 
-use config::{describe, normalize_dictionary, Cleanup, Config, ConfigStore};
+use config::{describe, normalize_dictionary, Cleanup, Config, ConfigStore, ProviderId};
 use dictation::{Captured, Dictation};
-use failure::Failure;
+use failure::{Failure, FailureKind};
 use history::{Entry, History};
 use portal::SharedAccess;
 use serde::Serialize;
@@ -159,6 +159,69 @@ fn update_dictionary(
 }
 
 #[tauri::command]
+fn update_provider(state: State<'_, AppState>, provider: ProviderId) -> Result<ConfigSnapshot, String> {
+    mutate_config(&state, |config| {
+        config.active_provider = provider;
+    })
+}
+
+#[tauri::command]
+fn update_provider_key(
+    state: State<'_, AppState>,
+    provider: ProviderId,
+    key: String,
+) -> Result<ConfigSnapshot, String> {
+    let trimmed = key.trim().to_owned();
+    let stored = if trimmed.is_empty() { None } else { Some(trimmed) };
+    mutate_config(&state, |config| {
+        config.providers.set_key(provider, stored);
+    })
+}
+
+/// A real request with the key under test. The failure keeps the one
+/// vocabulary, so the wizard and Speech say what the Pill would say.
+#[tauri::command]
+fn test_provider(state: State<'_, AppState>, provider: ProviderId) -> Result<(), Failure> {
+    let config = current_config(&state.loaded).map_err(failure::settings)?;
+    let key = config
+        .providers
+        .key(provider)
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| {
+            Failure::new(
+                FailureKind::KeyRejected,
+                format!("No key is stored for {}.", provider.as_str()),
+            )
+        })?
+        .clone();
+
+    let result = transcribe::key_test(transcribe::transcriber_for(provider).as_ref(), &key);
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let failure = failure::from_transcribe(error);
+            failure.log();
+            Err(failure)
+        }
+    }
+}
+
+/// Saves the shortcut and makes the listener use it at once, without leaving
+/// the previous key bound.
+#[tauri::command]
+fn update_trigger_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    let key = key.trim().to_owned();
+    hotkey::key_from_name(&key)?;
+    mutate_config(&state, |config| {
+        config.trigger_key = key.clone();
+    })?;
+    portal::update(&state.access, |access| {
+        access.hotkey.trigger = Some(key);
+    });
+    Ok(())
+}
+
+#[tauri::command]
 fn dictation_toggle(state: State<'_, AppState>) -> Result<(), String> {
     send(&state, Input::Toggle { at: Instant::now() })
 }
@@ -183,6 +246,13 @@ fn history_list(state: State<'_, AppState>, query: String) -> Result<Vec<Entry>,
 #[tauri::command]
 fn history_retry(state: State<'_, AppState>, id: String) -> Result<(), String> {
     send(&state, Input::Retry { id: Some(id) })
+}
+
+/// Re-transcribes a stored Recording with the other provider, keeping the
+/// first result in History beside the new one.
+#[tauri::command]
+fn history_retry_other(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    send(&state, Input::RetryOther { id: Some(id) })
 }
 
 #[tauri::command]
@@ -331,6 +401,10 @@ pub fn run() {
             config_snapshot,
             update_cleanup,
             update_dictionary,
+            update_provider,
+            update_provider_key,
+            update_trigger_key,
+            test_provider,
             app_info,
             dictation_toggle,
             dictation_cancel,
@@ -338,6 +412,7 @@ pub fn run() {
             dictation_state,
             history_list,
             history_retry,
+            history_retry_other,
             history_copy,
             history_recording,
             history_delete,
@@ -395,7 +470,7 @@ pub fn run() {
             tauri::async_runtime::spawn(hotkey::serve(
                 Arc::clone(&access),
                 inbox.clone(),
-                config.trigger_key.clone(),
+                Arc::clone(&loaded_state),
                 retry_hotkey_rx,
             ));
 
@@ -500,16 +575,19 @@ fn start_session(
             for effect in work {
                 match effect {
                     Effect::Transcribe {
-                        id, captured, ..
+                        id,
+                        captured,
+                        provider,
                     } => {
                         let loaded = Arc::clone(&loaded);
                         let cleaner = Arc::clone(&shared_cleaner);
                         let reply = effects.clone();
                         thread::spawn(move || {
                             let result = match current_config(&loaded) {
-                                Ok(config) => Dictation::transcribe_with_cleaner(
+                                Ok(config) => Dictation::transcribe_with(
                                     &config,
                                     &captured,
+                                    provider.unwrap_or(config.active_provider),
                                     cleaner
                                         .as_ref()
                                         .as_ref()

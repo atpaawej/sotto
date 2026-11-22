@@ -22,6 +22,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
+    config::ProviderId,
     dictation::{Attempt, Captured},
     failure::{self, Failure, FailureKind},
     history::{HistoryPort, Injection, RetrySource, StoredRecording},
@@ -65,6 +66,11 @@ pub enum Input {
     Retry {
         id: Option<String>,
     },
+    /// Re-transcribe a Recording with the other provider, keeping the first
+    /// result in History beside the new one.
+    RetryOther {
+        id: Option<String>,
+    },
     /// A background capability failed: the shortcut, the keyboard bridge or
     /// the store. These have no Recording to retry.
     CapabilityFailed {
@@ -84,6 +90,9 @@ pub enum Effect {
     Transcribe {
         id: Option<String>,
         captured: Captured,
+        /// `None` uses the active provider; a retry with the other provider
+        /// names the one to use here.
+        provider: Option<ProviderId>,
     },
     /// Something failed before there was anything to transcribe.
     Failed,
@@ -250,6 +259,7 @@ impl Session {
             Input::Cancel => self.cancel(),
             Input::Transcript { id, result } => self.transcript(id, result),
             Input::Retry { id } => self.retry(id),
+            Input::RetryOther { id } => self.retry_other(id),
             Input::CapabilityFailed { failure } => self.capability_failed(failure),
             Input::CapabilityRestored { kind } => self.capability_restored(kind),
         }
@@ -356,7 +366,11 @@ impl Session {
 
         self.state = State::Working { cancelled: false };
         self.show(None);
-        vec![Effect::Transcribe { id, captured }]
+        vec![Effect::Transcribe {
+            id,
+            captured,
+            provider: None,
+        }]
     }
 
     fn cancel(&mut self) -> Vec<Effect> {
@@ -509,34 +523,55 @@ impl Session {
 
     /// Sends a Recording already on disk to the provider again.
     fn retry(&mut self, id: Option<String>) -> Vec<Effect> {
-        if !matches!(self.state, State::Idle) {
+        if !self.can_retry() {
             return Vec::new();
         }
-
         let Some(id) = id.or_else(|| self.last.retry_id.clone()) else {
             return self.hint("Nothing to retry");
         };
-
         match self.ports.history.retry_source(&id) {
-            Ok(RetrySource { captured, .. }) => {
-                self.state = State::Working { cancelled: false };
-                self.pending_storage_failure = None;
-                self.last.message = None;
-                self.last.failure = None;
-                self.last.retry_id = None;
-                self.last.face = Phase::Idle;
-                self.show(None);
-                vec![Effect::Transcribe {
-                    id: Some(id),
-                    captured,
-                }]
-            }
-            Err(failure) => {
-                self.state = State::Idle;
-                self.last.attempt = None;
-                self.fail(failure, None, Some(FAILED_VISIBLE))
-            }
+            Ok(source) => self.start_retry(source),
+            Err(failure) => self.retry_failed(failure),
         }
+    }
+
+    /// Sends it to the other provider. History keeps both results.
+    fn retry_other(&mut self, id: Option<String>) -> Vec<Effect> {
+        if !self.can_retry() {
+            return Vec::new();
+        }
+        let Some(id) = id.or_else(|| self.last.retry_id.clone()) else {
+            return self.hint("Nothing to retry");
+        };
+        match self.ports.history.retry_other(&id) {
+            Ok(source) => self.start_retry(source),
+            Err(failure) => self.retry_failed(failure),
+        }
+    }
+
+    fn can_retry(&self) -> bool {
+        matches!(self.state, State::Idle)
+    }
+
+    fn start_retry(&mut self, source: RetrySource) -> Vec<Effect> {
+        self.state = State::Working { cancelled: false };
+        self.pending_storage_failure = None;
+        self.last.message = None;
+        self.last.failure = None;
+        self.last.retry_id = None;
+        self.last.face = Phase::Idle;
+        self.show(None);
+        vec![Effect::Transcribe {
+            id: Some(source.id),
+            captured: source.captured,
+            provider: source.provider,
+        }]
+    }
+
+    fn retry_failed(&mut self, failure: Failure) -> Vec<Effect> {
+        self.state = State::Idle;
+        self.last.attempt = None;
+        self.fail(failure, None, Some(FAILED_VISIBLE))
     }
 
     fn capability_failed(&mut self, failure: Failure) -> Vec<Effect> {
@@ -1119,6 +1154,43 @@ mod tests {
         assert_eq!(fake.take().injected, vec!["Back online.".to_owned()]);
         assert_eq!(session.view().phase, Phase::Done);
         assert!(session.view().failure.is_none());
+    }
+
+    #[test]
+    fn retrying_with_the_other_provider_uses_the_stored_recording() {
+        let fake = Shared::with_capture(2_000, false);
+        let mut session = session(&fake);
+
+        press_and_release(&mut session);
+        session.handle(transcribed("First provider."));
+        let effects = session.handle(Input::RetryOther {
+            id: Some(ID.to_owned()),
+        });
+
+        let transcribe = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Transcribe {
+                    id,
+                    captured,
+                    provider,
+                } => Some((id, captured, provider)),
+                Effect::Failed => None,
+            })
+            .expect("retry transcribes the stored recording");
+        assert_eq!(transcribe.0.as_deref(), Some("other-dictation-1"));
+        assert_eq!(transcribe.1.wav, vec![0u8; 4]);
+        assert_eq!(*transcribe.2, Some(ProviderId::ElevenLabs));
+
+        session.handle(Input::Transcript {
+            id: Some("other-dictation-1".to_owned()),
+            result: Ok(attempt("Second provider.")),
+        });
+
+        assert_eq!(
+            fake.take().injected,
+            vec!["First provider.".to_owned(), "Second provider.".to_owned()]
+        );
     }
 
     /// The acceptance path from ticket 07, with the real History rather than a

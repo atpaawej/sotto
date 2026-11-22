@@ -2,12 +2,20 @@
 //! via `evdev`, decoded into presses, releases, and Escape cancels for
 //! [`crate::session`].
 
-use std::{fs, io::ErrorKind, path::PathBuf, sync::mpsc::Sender, thread, time::Instant};
+use std::{
+    fs,
+    io::ErrorKind,
+    path::PathBuf,
+    sync::{mpsc::Sender, Arc, Mutex},
+    thread,
+    time::Instant,
+};
 
 use evdev::{Device, EventSummary, EventType, KeyCode};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
+    config::Config,
     failure::{self, FailureKind},
     keyboard,
     portal::{self, SharedAccess},
@@ -43,16 +51,18 @@ pub fn key_from_name(name: &str) -> Result<KeyCode, String> {
     }
 }
 
-/// Opens all readable keyboard devices and listens for `configured_key` and `Escape`.
-/// Re-probes whenever `retries` receives a signal.
+/// Opens all readable keyboard devices and listens for the configured trigger
+/// and Escape. The trigger is read from the live config on every key event, so
+/// changing it in Settings takes effect without reopening devices or leaving
+/// the old key bound. Re-probes whenever `retries` receives a signal.
 pub async fn serve(
     access: SharedAccess,
     inbox: Sender<Input>,
-    configured_key: String,
+    loaded: Arc<Mutex<Result<Config, String>>>,
     mut retries: UnboundedReceiver<()>,
 ) {
     loop {
-        match bind_keyboards(&access, &inbox, &configured_key) {
+        match bind_keyboards(&access, &inbox, Arc::clone(&loaded)) {
             Ok(()) => {
                 // Keep the task alive so a retry can re-enumerate if needed.
                 if retries.recv().await.is_none() {
@@ -84,20 +94,21 @@ pub async fn serve(
 fn bind_keyboards(
     access: &SharedAccess,
     inbox: &Sender<Input>,
-    configured_key: &str,
+    loaded: Arc<Mutex<Result<Config, String>>>,
 ) -> Result<(), String> {
-    let trigger = key_from_name(configured_key)?;
-    let devices = find_keyboards(trigger)?;
+    let configured_key = current_key(&loaded)?;
+    let devices = find_keyboards()?;
 
     for (path, device) in devices {
         let tx = inbox.clone();
-        thread::spawn(move || read_loop(path, device, trigger, tx));
+        let loaded = Arc::clone(&loaded);
+        thread::spawn(move || read_loop(path, device, loaded, tx));
     }
 
     eprintln!("hotkey: listening on evdev for {configured_key}");
     portal::update(access, |state| {
         state.hotkey.bound = true;
-        state.hotkey.trigger = Some(configured_key.to_owned());
+        state.hotkey.trigger = Some(configured_key);
         state.hotkey.problem = None;
     });
     if inbox
@@ -111,7 +122,7 @@ fn bind_keyboards(
     Ok(())
 }
 
-fn find_keyboards(trigger: KeyCode) -> Result<Vec<(PathBuf, Device)>, String> {
+fn find_keyboards() -> Result<Vec<(PathBuf, Device)>, String> {
     let entries = fs::read_dir("/dev/input")
         .map_err(|error| format!("could not read /dev/input: {error}"))?;
 
@@ -129,10 +140,12 @@ fn find_keyboards(trigger: KeyCode) -> Result<Vec<(PathBuf, Device)>, String> {
 
         match Device::open(&path) {
             Ok(device) => {
+                // Escape is the one key every reader needs; the trigger can
+                // change while these threads are running.
                 let is_keyboard = device.supported_events().contains(EventType::KEY)
-                    && device.supported_keys().is_some_and(|keys| {
-                        keys.contains(trigger) || keys.contains(KeyCode::KEY_ESC)
-                    });
+                    && device
+                        .supported_keys()
+                        .is_some_and(|keys| keys.contains(KeyCode::KEY_ESC));
                 if is_keyboard {
                     matched.push((path, device));
                 }
@@ -158,7 +171,20 @@ fn find_keyboards(trigger: KeyCode) -> Result<Vec<(PathBuf, Device)>, String> {
     Ok(matched)
 }
 
-fn read_loop(path: PathBuf, mut device: Device, trigger: KeyCode, inbox: Sender<Input>) {
+fn current_key(loaded: &Arc<Mutex<Result<Config, String>>>) -> Result<String, String> {
+    loaded
+        .lock()
+        .map_err(|_| "the config state was left locked by a panicking thread".to_owned())?
+        .clone()
+        .map(|config| config.trigger_key)
+}
+
+fn read_loop(
+    path: PathBuf,
+    mut device: Device,
+    loaded: Arc<Mutex<Result<Config, String>>>,
+    inbox: Sender<Input>,
+) {
     loop {
         let events = match device.fetch_events() {
             Ok(events) => events,
@@ -170,22 +196,40 @@ fn read_loop(path: PathBuf, mut device: Device, trigger: KeyCode, inbox: Sender<
 
         for event in events {
             if let EventSummary::Key(_, code, value) = event.destructure() {
-                if code == trigger {
-                    let msg = match value {
-                        1 => Some(Input::Press { at: Instant::now() }),
-                        0 => Some(Input::Release { at: Instant::now() }),
-                        _ => None, // Ignore key auto-repeat (2).
-                    };
-                    if let Some(input) = msg {
-                        if inbox.send(input).is_err() {
-                            return;
-                        }
+                if code == KeyCode::KEY_ESC && value == 1 {
+                    if inbox.send(Input::Cancel).is_err() {
+                        return;
                     }
-                } else if code == KeyCode::KEY_ESC
-                    && value == 1
-                    && inbox.send(Input::Cancel).is_err()
-                {
-                    return;
+                    continue;
+                }
+
+                let configured = match current_key(&loaded) {
+                    Ok(name) => name,
+                    Err(problem) => {
+                        eprintln!("hotkey: no trigger while settings are unreadable: {problem}");
+                        continue;
+                    }
+                };
+                let is_trigger = match key_from_name(&configured) {
+                    Ok(trigger) => trigger == code,
+                    Err(problem) => {
+                        eprintln!("hotkey: {problem}");
+                        false
+                    }
+                };
+                if !is_trigger {
+                    continue;
+                }
+
+                let msg = match value {
+                    1 => Some(Input::Press { at: Instant::now() }),
+                    0 => Some(Input::Release { at: Instant::now() }),
+                    _ => None, // Ignore key auto-repeat (2).
+                };
+                if let Some(input) = msg {
+                    if inbox.send(input).is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -207,5 +251,20 @@ mod tests {
     #[test]
     fn rejects_unknown_trigger_keys() {
         assert!(key_from_name("NotAKey").is_err());
+    }
+
+    #[test]
+    fn changing_the_trigger_takes_effect_without_rebinding() {
+        let loaded = Arc::new(Mutex::new(Ok(Config::default())));
+        assert_eq!(current_key(&loaded).expect("current key"), "ControlRight");
+
+        *loaded.lock().expect("lock") = Ok(Config {
+            trigger_key: "F9".to_owned(),
+            ..Config::default()
+        });
+
+        let changed = current_key(&loaded).expect("changed key");
+        assert_eq!(changed, "F9");
+        assert_eq!(key_from_name(&changed), Ok(KeyCode::KEY_F9));
     }
 }
