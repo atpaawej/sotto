@@ -18,6 +18,7 @@ mod portal;
 mod session;
 mod startup;
 mod transcribe;
+mod update;
 
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -348,6 +349,21 @@ fn set_start_at_login(enabled: bool) -> Result<(), String> {
     startup::set_start_at_login(enabled)
 }
 
+/// Asks GitHub for the newest release and reports whether it is newer than
+/// the running version.
+#[tauri::command]
+fn check_for_updates() -> Result<update::UpdateStatus, String> {
+    update::check(env!("CARGO_PKG_VERSION"))
+}
+
+/// Downloads the newest `.deb`, verifies its checksum and installs it with
+/// sudo. The running app keeps going; the user restarts it to use the new
+/// version.
+#[tauri::command]
+fn install_update() -> Result<(), String> {
+    update::install_latest()
+}
+
 #[tauri::command]
 fn retry_keyboard_access(state: State<'_, AppState>) -> Result<(), String> {
     state
@@ -437,6 +453,8 @@ pub fn run() {
             retry_keyboard_access,
             start_at_login_enabled,
             set_start_at_login,
+            check_for_updates,
+            install_update,
             open_main_window,
         ])
         .setup(|app| {
