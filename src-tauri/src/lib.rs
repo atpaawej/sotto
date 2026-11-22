@@ -272,7 +272,7 @@ fn update_trigger_key(
     key: String,
 ) -> Result<ConfigSnapshot, String> {
     let key = key.trim().to_owned();
-    hotkey::key_from_name(&key)?;
+    hotkey::keys_from_spec(&key)?;
     let snapshot = mutate_config(&state, |config| {
         config.trigger_key = key.clone();
     })?;
@@ -302,6 +302,18 @@ fn dictation_retry(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn history_list(state: State<'_, AppState>, query: String) -> Result<Vec<Entry>, String> {
     state.history.list(&query).map_err(fail)
+}
+
+#[tauri::command]
+fn history_insights(
+    state: State<'_, AppState>,
+    range: history::InsightsRange,
+    tz_offset_minutes: i32,
+) -> Result<history::InsightsSnapshot, String> {
+    state
+        .history
+        .insights(range, tz_offset_minutes)
+        .map_err(fail)
 }
 
 #[tauri::command]
@@ -513,6 +525,7 @@ pub fn run() {
             dictation_retry,
             dictation_state,
             history_list,
+            history_insights,
             history_retry,
             history_retry_other,
             history_copy,

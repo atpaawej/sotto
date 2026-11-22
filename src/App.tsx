@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { listen } from "@tauri-apps/api/event";
 import {
   asFailure,
-  cancelDictation,
   checkForUpdates,
   copyHistory,
   deleteAllHistory,
@@ -11,38 +10,39 @@ import {
   injectorLabel,
   installUpdate,
   keyLabel,
+  normalizeShortcutCode,
   otherProvider,
   providerLabel,
   PROVIDERS,
   readAccess,
   readAppInfo,
   readConfig,
-  readDictationState,
   readHistory,
+  readInsights,
   readRecording,
-  retryDictation,
   retryHistory,
   retryHistoryOther,
   retryKeyboardAccess,
   setStartAtLogin,
   startAtLoginEnabled,
   testProvider,
-  toggleDictation,
   updateCleanup,
   updateDictionary,
   updatePillVisibility,
   updateProvider,
   updateProviderKey,
   updateRetention,
+  updateTriggerKey,
   type Access,
   type AppInfo,
-  type Attempt,
   type Cleanup,
   type CleanupLevel,
   type ConfigSnapshot,
   type DictationState,
   type Failure,
   type HistoryEntry,
+  type InsightsRange,
+  type InsightsSnapshot,
   type PillVisibility,
   type ProviderId,
   type UpdateStatus,
@@ -55,6 +55,7 @@ type Loaded =
   | { status: "failed"; message: string };
 
 const SECTIONS = [
+  { id: "insights", label: "Insights" },
   { id: "general", label: "General" },
   { id: "speech", label: "Speech" },
   { id: "cleanup", label: "Cleanup" },
@@ -67,7 +68,7 @@ type SectionId = (typeof SECTIONS)[number]["id"];
 
 export default function App() {
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
-  const [active, setActive] = useState<SectionId>("general");
+  const [active, setActive] = useState<SectionId>("insights");
   const [access, setAccess] = useState<Access | null>(null);
   // Decided on the first successful load: saving a key mid-wizard must not
   // close it before the live test and the test dictation have both passed.
@@ -211,6 +212,9 @@ function Section({
   const info = loaded.status === "ready" ? loaded.info : undefined;
 
   switch (id) {
+    case "insights":
+      return <InsightsSection />;
+
     case "general":
       return (
         <GeneralSection
@@ -244,7 +248,7 @@ function Section({
       return <HistorySection snapshot={snapshot} onSnapshot={onSnapshot} />;
 
     case "about":
-      return <AboutSection info={info} />;
+      return <AboutSection info={info} snapshot={snapshot} access={access} />;
   }
 }
 
@@ -268,6 +272,246 @@ function Row({
   );
 }
 
+function Switch({
+  checked,
+  disabled,
+  label,
+  onToggle,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      className="switch"
+      disabled={disabled}
+      onClick={onToggle}
+    >
+      <span className="switch-thumb" aria-hidden="true" />
+    </button>
+  );
+}
+
+const INSIGHTS_RANGES: { id: InsightsRange; label: string }[] = [
+  { id: "7d", label: "7 days" },
+  { id: "30d", label: "30 days" },
+  { id: "all", label: "All time" },
+];
+
+function formatDurationHuman(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes > 0 ? `${hours}h ${remMinutes}m` : `${hours}h`;
+}
+
+function buildHeatmapDays(
+  dailyActivity: InsightsSnapshot["dailyActivity"],
+  daysCount: number,
+): { date: string; count: number; words: number; level: 0 | 1 | 2 | 3 }[] {
+  const byDate = new Map(dailyActivity.map((item) => [item.date, item]));
+  const maxWords = Math.max(1, ...dailyActivity.map((item) => item.words));
+  const cells: { date: string; count: number; words: number; level: 0 | 1 | 2 | 3 }[] = [];
+  const today = new Date();
+  for (let offset = daysCount - 1; offset >= 0; offset -= 1) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - offset);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const date = `${yyyy}-${mm}-${dd}`;
+    const entry = byDate.get(date);
+    const words = entry?.words ?? 0;
+    const count = entry?.count ?? 0;
+    let level: 0 | 1 | 2 | 3 = 0;
+    if (words > 0) {
+      const ratio = words / maxWords;
+      level = ratio > 0.66 ? 3 : ratio > 0.33 ? 2 : 1;
+    }
+    cells.push({ date, count, words, level });
+  }
+  return cells;
+}
+
+function InsightsSection() {
+  const [range, setRange] = useState<InsightsRange>("30d");
+  const [data, setData] = useState<InsightsSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    readInsights(range).then(
+      (snapshot) => {
+        if (!cancelled) setData(snapshot);
+      },
+      (err: unknown) => {
+        if (!cancelled) setError(asFailure(err).detail);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [range]);
+
+  const heatmapDays = data ? buildHeatmapDays(data.dailyActivity, 84) : [];
+  const successRate =
+    data && data.totalDictations > 0
+      ? Math.round((data.insertedCount / data.totalDictations) * 100)
+      : 0;
+
+  return (
+    <section className="section">
+      <div className="insights-header">
+        <div>
+          <h1 className="section-title">Insights</h1>
+          <p className="section-deck">
+            Your local dictation pace, streaks, and time saved.
+          </p>
+        </div>
+        <div className="segmented" role="group" aria-label="Insights range">
+          {INSIGHTS_RANGES.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="segmented-button"
+              aria-pressed={range === item.id}
+              onClick={() => setRange(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && (
+        <div className="notice" role="alert">
+          <p className="notice-title">Could not load insights.</p>
+          <p className="notice-detail">{error}</p>
+        </div>
+      )}
+
+      {data && data.totalDictations === 0 ? (
+        <p className="empty quiet">
+          No dictations in this range yet. Hold your trigger shortcut to speak —
+          your pace, streak, and time saved will appear here.
+        </p>
+      ) : data ? (
+        <div className="insights-body">
+          <div className="kpi-grid">
+            <div className="kpi">
+              <p className="kpi-label">Words dictated</p>
+              <p className="kpi-value">{data.totalWords.toLocaleString()}</p>
+              <p className="kpi-sub">
+                {data.totalDictations}{" "}
+                {data.totalDictations === 1 ? "dictation" : "dictations"}
+              </p>
+            </div>
+            <div className="kpi">
+              <p className="kpi-label">Average pace</p>
+              <p className="kpi-value">{data.avgWpm} WPM</p>
+              <p className="kpi-sub">
+                {formatDurationHuman(data.totalSpeakingMs)} speaking
+              </p>
+            </div>
+            <div className="kpi">
+              <p className="kpi-label">Time saved</p>
+              <p className="kpi-value">
+                {formatDurationHuman(data.estimatedTimeSavedMs)}
+              </p>
+              <p className="kpi-sub">vs. 40 WPM typing</p>
+            </div>
+            <div className="kpi">
+              <p className="kpi-label">Daily streak</p>
+              <p className="kpi-value">
+                {data.currentStreakDays}{" "}
+                {data.currentStreakDays === 1 ? "day" : "days"}
+              </p>
+              <p className="kpi-sub">Best: {data.longestStreakDays} days</p>
+            </div>
+          </div>
+
+          <div className="insights-block">
+            <div className="insights-block-head">
+              <h2 className="insights-heading">Activity</h2>
+              <span className="insights-meta">Last 12 weeks</span>
+            </div>
+            <div className="heatmap" role="img" aria-label="Daily dictation activity">
+              {heatmapDays.map((cell) => (
+                <span
+                  key={cell.date}
+                  className={`heatmap-cell heatmap-level-${cell.level}`}
+                  title={`${cell.date}: ${cell.words} words (${cell.count} ${cell.count === 1 ? "dictation" : "dictations"})`}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="insights-split">
+            <div className="insights-block">
+              <h2 className="insights-heading">Reliability &amp; Cleanup</h2>
+              <dl className="insights-stats">
+                <div className="insights-stat-row">
+                  <dt>Inserted</dt>
+                  <dd className="tabular">
+                    {successRate}% ({data.insertedCount}/{data.totalDictations})
+                  </dd>
+                </div>
+                <div className="insights-stat-row">
+                  <dt>Words trimmed by Cleanup</dt>
+                  <dd className="tabular">{data.wordsTrimmed.toLocaleString()}</dd>
+                </div>
+                {(data.failedCount > 0 || data.blockedCount > 0) && (
+                  <div className="insights-stat-row">
+                    <dt>Failed / blocked</dt>
+                    <dd className="tabular">
+                      {data.failedCount} failed · {data.blockedCount} blocked
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+
+            <div className="insights-block">
+              <h2 className="insights-heading">Providers &amp; Latency</h2>
+              {data.byProvider.length > 0 ? (
+                <dl className="insights-stats">
+                  {data.byProvider.map((item) => (
+                    <div className="insights-stat-row" key={item.provider}>
+                      <dt>
+                        {providerLabel(item.provider)}{" "}
+                        <span className="insights-meta">({item.count})</span>
+                      </dt>
+                      <dd className="tabular">
+                        {item.avgTotalMs !== null
+                          ? `${formatMilliseconds(item.avgTotalMs)} avg`
+                          : "No timings yet"}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p className="quiet">No provider activity yet.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function GeneralSection({
   snapshot,
   access,
@@ -279,6 +523,10 @@ function GeneralSection({
 }) {
   const [atLogin, setAtLogin] = useState(false);
   const [pillSaving, setPillSaving] = useState(false);
+  const [recordingShortcut, setRecordingShortcut] = useState(false);
+  const [pendingKeys, setPendingKeys] = useState<string[]>([]);
+  const [shortcutSaving, setShortcutSaving] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -289,6 +537,69 @@ function GeneralSection({
       cancelled = true;
     };
   }, []);
+
+  const commitShortcut = useCallback(
+    async (keys: string[]) => {
+      const spec = keys.join("+");
+      setRecordingShortcut(false);
+      setPendingKeys([]);
+      if (!spec) return;
+      setShortcutSaving(true);
+      setShortcutError(null);
+      try {
+        const updated = await updateTriggerKey(spec);
+        onSnapshot(updated);
+      } catch (err) {
+        setShortcutError(String(err));
+      } finally {
+        setShortcutSaving(false);
+      }
+    },
+    [onSnapshot],
+  );
+
+  useEffect(() => {
+    if (!recordingShortcut) return;
+    const held: string[] = [];
+
+    function onKeyDown(event: KeyboardEvent) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code === "Escape") {
+        setRecordingShortcut(false);
+        setPendingKeys([]);
+        return;
+      }
+      const normalized = normalizeShortcutCode(event.code);
+      if (!normalized) {
+        setShortcutError(`Unsupported key "${event.key}". Try Ctrl, Alt, Shift, Super, Space, F1–F12, or A–Z.`);
+        return;
+      }
+      setShortcutError(null);
+      if (!held.includes(normalized) && held.length < 3) {
+        held.push(normalized);
+        setPendingKeys([...held]);
+      }
+      if (held.length === 3) {
+        void commitShortcut(held);
+      }
+    }
+
+    function onKeyUp(event: KeyboardEvent) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (held.length > 0) {
+        void commitShortcut(held);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [recordingShortcut, commitShortcut]);
 
   async function toggleAtLogin() {
     const next = !atLogin;
@@ -312,42 +623,74 @@ function GeneralSection({
     }
   }
 
-  const injector = access?.injection.active || null;
   const pillVisibility = snapshot?.config.pill_visibility ?? "always";
+  const currentTrigger = snapshot?.config.trigger_key ?? "ControlRight";
 
   return (
     <section className="section">
       <h1 className="section-title">General</h1>
       <p className="section-deck">
-        How dictation starts, and where the rest of these settings live.
+        Shortcut, startup, and floating pill behavior.
       </p>
       {snapshot ? (
         <dl className="rows">
-          <Row
-            label="Trigger key"
-            value={
-              access?.hotkey.trigger ?? keyLabel(snapshot.config.trigger_key)
-            }
-            hint={
-              access?.hotkey.bound
-                ? "Hold to dictate anywhere. Double-tap to lock it on."
-                : "Not bound yet — Speech says what went wrong."
-            }
-          />
-          <Row
-            label="Start at login"
-            value={
-              <button
-                type="button"
-                className="button button-quiet toggle-button"
-                aria-pressed={atLogin}
-                onClick={() => void toggleAtLogin()}
-              >
-                {atLogin ? "On" : "Off"}
-              </button>
-            }
-            hint="The app opens when you log in."
-          />
+          <div className="row">
+            <dt className="row-label">Trigger shortcut</dt>
+            <dd className="row-value">
+              <div className="shortcut-control">
+                <kbd className="shortcut-kbd">
+                  {recordingShortcut
+                    ? pendingKeys.length > 0
+                      ? pendingKeys.map(keyLabel).join(" + ")
+                      : "Press 1–3 keys…"
+                    : keyLabel(currentTrigger)}
+                </kbd>
+                <button
+                  type="button"
+                  className="button button-quiet"
+                  disabled={shortcutSaving}
+                  onClick={() => {
+                    setShortcutError(null);
+                    setPendingKeys([]);
+                    setRecordingShortcut((prev) => !prev);
+                  }}
+                >
+                  {recordingShortcut ? "Cancel" : "Change"}
+                </button>
+                {!recordingShortcut && currentTrigger !== "ControlRight" && (
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    disabled={shortcutSaving}
+                    onClick={() => void commitShortcut(["ControlRight"])}
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+              <p className="row-hint">
+                {recordingShortcut
+                  ? "Hold 1–3 keys together and release to save, or press Esc to cancel."
+                  : access?.hotkey.bound
+                    ? "Hold to dictate anywhere. Double-tap to lock it on."
+                    : "Not bound yet — Speech shows what went wrong."}
+              </p>
+              {shortcutError && (
+                <p className="key-test-failed">{shortcutError}</p>
+              )}
+            </dd>
+          </div>
+          <div className="row">
+            <dt className="row-label">Start at login</dt>
+            <dd className="row-value">
+              <Switch
+                checked={atLogin}
+                label="Start at login"
+                onToggle={() => void toggleAtLogin()}
+              />
+              <p className="row-hint">Open Sotto automatically when you log in.</p>
+            </dd>
+          </div>
           <Row
             label="Floating pill"
             value={
@@ -381,28 +724,7 @@ function GeneralSection({
                 ? "Stays at the bottom centre as a compact bar."
                 : pillVisibility === "active_only"
                   ? "Appears while listening, working, or showing a result."
-                  : "Hidden at all times. Failures still appear in History and notifications."
-            }
-          />
-          <Row
-            label="Injector"
-            value={injector ? injectorLabel(injector) : "None"}
-            hint={
-              access?.injection.reason || access?.injection.problem || undefined
-            }
-          />
-          <Row
-            label="Provider"
-            value={providerLabel(snapshot.config.active_provider)}
-            hint="Only the provider you pick receives your audio."
-          />
-          <Row
-            label="Settings file"
-            value={<span className="mono">{snapshot.path}</span>}
-            hint={
-              snapshot.mode === "600"
-                ? "Mode 600. Only your user account can read it."
-                : `Mode ${snapshot.mode}.`
+                  : "Hidden at all times. Failures still appear in History."
             }
           />
         </dl>
@@ -425,24 +747,30 @@ function updatesState(status: UpdateStatus): UpdatesState {
   return { status: "available", latest: status.latest ?? "" };
 }
 
-function AboutSection({ info }: { info?: AppInfo }) {
+function AboutSection({
+  info,
+  snapshot,
+  access,
+}: {
+  info?: AppInfo;
+  snapshot?: ConfigSnapshot;
+  access: Access | null;
+}) {
   const [state, setState] = useState<UpdatesState>({ status: "checking" });
   const [installing, setInstalling] = useState(false);
+  const [copiedPath, setCopiedPath] = useState(false);
+
+  const runCheck = useCallback(() => {
+    setState({ status: "checking" });
+    checkForUpdates().then(
+      (status) => setState(updatesState(status)),
+      () => setState({ status: "error" }),
+    );
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    checkForUpdates().then(
-      (status) => {
-        if (!cancelled) setState(updatesState(status));
-      },
-      () => {
-        if (!cancelled) setState({ status: "error" });
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    runCheck();
+  }, [runCheck]);
 
   async function install() {
     setInstalling(true);
@@ -454,6 +782,13 @@ function AboutSection({ info }: { info?: AppInfo }) {
     } finally {
       setInstalling(false);
     }
+  }
+
+  async function copyConfigPath() {
+    if (!snapshot) return;
+    await navigator.clipboard.writeText(snapshot.path);
+    setCopiedPath(true);
+    window.setTimeout(() => setCopiedPath(false), 1600);
   }
 
   const text: Record<UpdatesState["status"], string> = {
@@ -471,6 +806,8 @@ function AboutSection({ info }: { info?: AppInfo }) {
         ? "Restart Sotto to use it."
         : undefined;
 
+  const injector = access?.injection.active || null;
+
   return (
     <section className="section">
       <h1 className="section-title">About</h1>
@@ -486,20 +823,64 @@ function AboutSection({ info }: { info?: AppInfo }) {
           <div className="row">
             <dt className="row-label">Updates</dt>
             <dd className="row-value">
-              <p>{text[state.status]}</p>
+              <div className="shortcut-control">
+                <span>{text[state.status]}</span>
+                {state.status !== "checking" &&
+                  state.status !== "installed" &&
+                  !installing && (
+                    <button
+                      type="button"
+                      className="button button-quiet"
+                      onClick={runCheck}
+                    >
+                      Check for updates
+                    </button>
+                  )}
+                {state.status === "available" && (
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => void install()}
+                    disabled={installing}
+                  >
+                    {installing ? "Installing…" : "Install update"}
+                  </button>
+                )}
+              </div>
               {hint && <p className="row-hint">{hint}</p>}
-              {state.status === "available" && (
-                <button
-                  type="button"
-                  className="button"
-                  onClick={() => void install()}
-                  disabled={installing}
-                >
-                  {installing ? "Installing…" : "Install update"}
-                </button>
-              )}
             </dd>
           </div>
+          {injector && (
+            <Row
+              label="Injector"
+              value={injectorLabel(injector)}
+              hint={
+                access?.injection.reason || access?.injection.problem || undefined
+              }
+            />
+          )}
+          {snapshot && (
+            <div className="row">
+              <dt className="row-label">Settings file</dt>
+              <dd className="row-value">
+                <div className="shortcut-control">
+                  <span className="mono">{snapshot.path}</span>
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    onClick={() => void copyConfigPath()}
+                  >
+                    {copiedPath ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <p className="row-hint">
+                  {snapshot.mode === "600"
+                    ? "Mode 600. Only your user account can read it."
+                    : `Mode ${snapshot.mode}.`}
+                </p>
+              </dd>
+            </div>
+          )}
         </dl>
       ) : null}
     </section>
@@ -659,15 +1040,12 @@ function RuleToggle({
     <div className="row">
       <dt className="row-label">{label}</dt>
       <dd className="row-value">
-        <button
-          type="button"
-          className="button button-quiet toggle-button"
-          aria-pressed={on}
+        <Switch
+          checked={on}
           disabled={disabled}
-          onClick={onToggle}
-        >
-          {on ? "On" : "Off"}
-        </button>
+          label={label}
+          onToggle={onToggle}
+        />
       </dd>
     </div>
   );
@@ -1217,107 +1595,14 @@ function SpeechSection({
   refreshAccess: () => void;
   onSnapshot: (snapshot: ConfigSnapshot) => void;
 }) {
-  const [dictation, setDictation] = useState<DictationState | null>(null);
-  const [elapsed, setElapsed] = useState(0);
-  const [busy, setBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
-  const [retryingDictation, setRetryingDictation] = useState(false);
   const [keyDrafts, setKeyDrafts] = useState<Partial<Record<ProviderId, string>>>({});
   const [keyTests, setKeyTests] = useState<Partial<Record<ProviderId, KeyTest>>>({});
   const [savingKey, setSavingKey] = useState<ProviderId | null>(null);
   const [switching, setSwitching] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
-  const since = useRef<number | null>(null);
 
   const activeProvider = snapshot?.config.active_provider ?? "groq";
-  const activeKey =
-    activeProvider === "groq"
-      ? snapshot?.config.providers.groq_key
-      : snapshot?.config.providers.elevenlabs_key;
-  const hasKey = Boolean(activeKey?.trim());
-  const phase = dictation?.phase ?? "idle";
-  const recording = phase === "listening";
-  const working = phase === "working";
-
-  // The hotkey can start a dictation while this window is closed, so the state
-  // comes from the backend rather than from clicks here.
-  useEffect(() => {
-    let cancelled = false;
-
-    readDictationState().then(
-      (state) => {
-        if (!cancelled) setDictation(state);
-      },
-      () => {
-        // Events still arrive; only the initial resync is lost.
-      },
-    );
-
-    const unlisten = listen<DictationState>(DICTATION_EVENT, (event) => {
-      setDictation(event.payload);
-    });
-
-    return () => {
-      cancelled = true;
-      void unlisten.then((stop) => stop());
-    };
-  }, []);
-
-  useEffect(() => {
-    if (phase !== "listening") {
-      since.current = null;
-      setElapsed(0);
-      return;
-    }
-
-    // A dictation started by the hotkey arrives as an event, so the clock
-    // starts when this window hears about it.
-    since.current ??= Date.now();
-    const tick = () => {
-      if (since.current) setElapsed(Date.now() - since.current);
-    };
-    tick();
-    const id = window.setInterval(tick, 100);
-    return () => window.clearInterval(id);
-  }, [phase]);
-
-  async function toggle() {
-    if (busy || working) return;
-    setBusy(true);
-    try {
-      await toggleDictation();
-    } catch (error) {
-      setDictation({
-        phase: "failed",
-        locked: false,
-        tapMode: false,
-        message: String(error),
-        attempt: null,
-        failure: null,
-        retryId: null,
-        injected: false,
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function cancel() {
-    try {
-      await cancelDictation();
-    } catch (error) {
-      setDictation({
-        phase: "failed",
-        locked: false,
-        tapMode: false,
-        message: String(error),
-        attempt: null,
-        failure: null,
-        retryId: null,
-        injected: false,
-      });
-    }
-  }
 
   async function retryAccess() {
     setRetrying(true);
@@ -1325,38 +1610,9 @@ function SpeechSection({
       await retryKeyboardAccess();
       window.setTimeout(refreshAccess, 800);
     } catch (error) {
-      setDictation({
-        phase: "failed",
-        locked: false,
-        tapMode: false,
-        message: String(error),
-        attempt: null,
-        failure: null,
-        retryId: null,
-        injected: false,
-      });
+      setProviderError(asFailure(error).detail);
     } finally {
       setRetrying(false);
-    }
-  }
-
-  async function retryLast() {
-    setRetryingDictation(true);
-    try {
-      await retryDictation();
-    } catch (error) {
-      setDictation({
-        phase: "failed",
-        locked: false,
-        tapMode: false,
-        message: String(error),
-        attempt: null,
-        failure: null,
-        retryId: null,
-        injected: false,
-      });
-    } finally {
-      setRetryingDictation(false);
     }
   }
 
@@ -1401,13 +1657,7 @@ function SpeechSection({
     }
   }
 
-  const label = recording
-    ? "Stop and insert"
-    : working
-      ? "Transcribing…"
-      : "Start dictation";
-
-  const trigger = access?.hotkey.trigger;
+  const trigger = access?.hotkey.trigger ? keyLabel(access.hotkey.trigger) : null;
 
   return (
     <section className="section">
@@ -1533,129 +1783,10 @@ function SpeechSection({
           <p className="notice-detail">{providerError}</p>
         </div>
       )}
-
-      <div className="dictation">
-        <button
-          className={recording ? "button button-live" : "button"}
-          type="button"
-          onClick={() => void toggle()}
-          disabled={!hasKey || working || busy}
-        >
-          {recording && <span className="recording-dot" aria-hidden="true" />}
-          {label}
-        </button>
-
-        {recording && (
-          <span className="timer" role="timer" aria-live="off">
-            {formatElapsed(elapsed)}
-          </span>
-        )}
-
-        {working && (
-          <button
-            className="button button-quiet"
-            type="button"
-            onClick={() => void cancel()}
-          >
-            Cancel
-          </button>
-        )}
-      </div>
-
-      <p className="dictation-hint" aria-live="polite">
-        {!hasKey ? (
-          <>
-            Add a {providerLabel(activeProvider)} key above to dictate. Keys
-            never leave this machine except to the provider.
-          </>
-        ) : recording ? (
-          dictation?.tapMode || dictation?.locked
-            ? "Recording. Tap the shortcut again when you have finished."
-            : "Recording. Release the shortcut when you have finished."
-        ) : working ? (
-          "The recording is on its way. Cancel keeps it out of your document."
-        ) : phase === "hint" && dictation?.message ? (
-          dictation.message
-        ) : trigger ? (
-          `Hold ${trigger} anywhere. Double-tap to lock it on until the next tap.`
-        ) : (
-          "Speak naturally. The audio is deleted as soon as the text comes back."
-        )}
-      </p>
-
-      {phase === "failed" && (dictation?.failure || dictation?.message) && (
-        <div className="notice" role="alert">
-          <p className="notice-title">
-            {dictation?.failure?.reason ?? "That dictation did not go through."}
-          </p>
-          <p className="notice-detail">
-            {dictation?.failure?.detail ?? dictation?.message}
-          </p>
-          {dictation?.failure?.cause && (
-            <p className="notice-detail mono">{dictation.failure.cause}</p>
-          )}
-          {dictation?.retryId && (
-            <button
-              className="button button-quiet"
-              type="button"
-              onClick={() => void retryLast()}
-              disabled={retryingDictation}
-            >
-              {retryingDictation ? "Retrying…" : "Retry the recording"}
-            </button>
-          )}
-        </div>
-      )}
-
-      {phase === "done" && dictation?.attempt && (
-        <Result attempt={dictation.attempt} />
-      )}
     </section>
   );
 }
 
-function Result({ attempt }: { attempt: Attempt }) {
-  const { timings } = attempt;
-  const recorded = formatElapsed(attempt.durationMs);
-  const shown = attempt.cleaned || attempt.transcript;
-  const rawDiffers =
-    Boolean(attempt.transcript) && attempt.transcript !== shown;
-
-  return (
-    <div className="result">
-      <blockquote className="transcript">
-        {shown || "No words came back. Try speaking a little closer."}
-      </blockquote>
-      {rawDiffers && (
-        <p className="row-hint">
-          Raw transcript: <span className="mono">{attempt.transcript}</span>
-        </p>
-      )}
-      <p className="result-meta">
-        {providerLabel(attempt.provider)}{" "}
-        <span className="mono">{attempt.model}</span>
-        {attempt.cleanupModel && (
-          <>
-            {" + "}
-            <span className="mono">{attempt.cleanupModel}</span>
-          </>
-        )}
-        , {recorded} of audio, back in {formatMilliseconds(timings.totalMs)}.
-      </p>
-      <p className="timings">
-        Stopping {formatMilliseconds(timings.stopMs)}, encoding{" "}
-        {formatMilliseconds(timings.encodeMs)}, upload{" "}
-        {formatMilliseconds(timings.uploadMs)}, provider{" "}
-        {formatMilliseconds(timings.providerMs)}
-        {timings.cleanupMs > 0 &&
-          `, cleanup ${formatMilliseconds(timings.cleanupMs)}`}
-        .
-      </p>
-    </div>
-  );
-}
-
-/** 3400 → "3.4 s", 12400 → "12.4 s" */
 function formatElapsed(milliseconds: number): string {
   return `${(milliseconds / 1000).toFixed(1)} s`;
 }

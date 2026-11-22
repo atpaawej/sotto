@@ -3,6 +3,7 @@
 //! [`crate::session`].
 
 use std::{
+    collections::HashSet,
     fs,
     io::ErrorKind,
     path::PathBuf,
@@ -35,6 +36,20 @@ pub fn key_from_name(name: &str) -> Result<KeyCode, String> {
         "SuperLeft" | "MetaLeft" | "KEY_LEFTMETA" => Ok(KeyCode::KEY_LEFTMETA),
         "CapsLock" | "KEY_CAPSLOCK" => Ok(KeyCode::KEY_CAPSLOCK),
         "Space" | "KEY_SPACE" => Ok(KeyCode::KEY_SPACE),
+        "Tab" | "KEY_TAB" => Ok(KeyCode::KEY_TAB),
+        "Enter" | "KEY_ENTER" => Ok(KeyCode::KEY_ENTER),
+        "Backspace" | "KEY_BACKSPACE" => Ok(KeyCode::KEY_BACKSPACE),
+        "Backquote" | "KEY_GRAVE" => Ok(KeyCode::KEY_GRAVE),
+        "Minus" | "KEY_MINUS" => Ok(KeyCode::KEY_MINUS),
+        "Equal" | "KEY_EQUAL" => Ok(KeyCode::KEY_EQUAL),
+        "BracketLeft" | "KEY_LEFTBRACE" => Ok(KeyCode::KEY_LEFTBRACE),
+        "BracketRight" | "KEY_RIGHTBRACE" => Ok(KeyCode::KEY_RIGHTBRACE),
+        "Backslash" | "KEY_BACKSLASH" => Ok(KeyCode::KEY_BACKSLASH),
+        "Semicolon" | "KEY_SEMICOLON" => Ok(KeyCode::KEY_SEMICOLON),
+        "Quote" | "KEY_APOSTROPHE" => Ok(KeyCode::KEY_APOSTROPHE),
+        "Comma" | "KEY_COMMA" => Ok(KeyCode::KEY_COMMA),
+        "Period" | "KEY_DOT" => Ok(KeyCode::KEY_DOT),
+        "Slash" | "KEY_SLASH" => Ok(KeyCode::KEY_SLASH),
         "F1" | "KEY_F1" => Ok(KeyCode::KEY_F1),
         "F2" | "KEY_F2" => Ok(KeyCode::KEY_F2),
         "F3" | "KEY_F3" => Ok(KeyCode::KEY_F3),
@@ -47,7 +62,93 @@ pub fn key_from_name(name: &str) -> Result<KeyCode, String> {
         "F10" | "KEY_F10" => Ok(KeyCode::KEY_F10),
         "F11" | "KEY_F11" => Ok(KeyCode::KEY_F11),
         "F12" | "KEY_F12" => Ok(KeyCode::KEY_F12),
+        "KeyA" | "A" | "a" => Ok(KeyCode::KEY_A),
+        "KeyB" | "B" | "b" => Ok(KeyCode::KEY_B),
+        "KeyC" | "C" | "c" => Ok(KeyCode::KEY_C),
+        "KeyD" | "D" | "d" => Ok(KeyCode::KEY_D),
+        "KeyE" | "E" | "e" => Ok(KeyCode::KEY_E),
+        "KeyF" | "F" | "f" => Ok(KeyCode::KEY_F),
+        "KeyG" | "G" | "g" => Ok(KeyCode::KEY_G),
+        "KeyH" | "H" | "h" => Ok(KeyCode::KEY_H),
+        "KeyI" | "I" | "i" => Ok(KeyCode::KEY_I),
+        "KeyJ" | "J" | "j" => Ok(KeyCode::KEY_J),
+        "KeyK" | "K" | "k" => Ok(KeyCode::KEY_K),
+        "KeyL" | "L" | "l" => Ok(KeyCode::KEY_L),
+        "KeyM" | "M" | "m" => Ok(KeyCode::KEY_M),
+        "KeyN" | "N" | "n" => Ok(KeyCode::KEY_N),
+        "KeyO" | "O" | "o" => Ok(KeyCode::KEY_O),
+        "KeyP" | "P" | "p" => Ok(KeyCode::KEY_P),
+        "KeyQ" | "Q" | "q" => Ok(KeyCode::KEY_Q),
+        "KeyR" | "R" | "r" => Ok(KeyCode::KEY_R),
+        "KeyS" | "S" | "s" => Ok(KeyCode::KEY_S),
+        "KeyT" | "T" | "t" => Ok(KeyCode::KEY_T),
+        "KeyU" | "U" | "u" => Ok(KeyCode::KEY_U),
+        "KeyV" | "V" | "v" => Ok(KeyCode::KEY_V),
+        "KeyW" | "W" | "w" => Ok(KeyCode::KEY_W),
+        "KeyX" | "X" | "x" => Ok(KeyCode::KEY_X),
+        "KeyY" | "Y" | "y" => Ok(KeyCode::KEY_Y),
+        "KeyZ" | "Z" | "z" => Ok(KeyCode::KEY_Z),
+        "Digit0" | "0" => Ok(KeyCode::KEY_0),
+        "Digit1" | "1" => Ok(KeyCode::KEY_1),
+        "Digit2" | "2" => Ok(KeyCode::KEY_2),
+        "Digit3" | "3" => Ok(KeyCode::KEY_3),
+        "Digit4" | "4" => Ok(KeyCode::KEY_4),
+        "Digit5" | "5" => Ok(KeyCode::KEY_5),
+        "Digit6" | "6" => Ok(KeyCode::KEY_6),
+        "Digit7" | "7" => Ok(KeyCode::KEY_7),
+        "Digit8" | "8" => Ok(KeyCode::KEY_8),
+        "Digit9" | "9" => Ok(KeyCode::KEY_9),
         other => Err(format!("unsupported trigger key `{other}`")),
+    }
+}
+
+/// Parses a 1–3 key shortcut spec such as `"ControlRight"` or `"ControlLeft+AltLeft+Space"`.
+pub fn keys_from_spec(spec: &str) -> Result<Vec<KeyCode>, String> {
+    let parts: Vec<&str> = spec.split('+').map(str::trim).collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err(format!("invalid trigger shortcut `{spec}`"));
+    }
+    if parts.len() > 3 {
+        return Err("a trigger shortcut can use at most 3 keys".to_owned());
+    }
+    let mut keys = Vec::with_capacity(parts.len());
+    for part in parts {
+        let code = key_from_name(part)?;
+        if keys.contains(&code) {
+            return Err(format!("duplicate key `{part}` in trigger shortcut"));
+        }
+        keys.push(code);
+    }
+    Ok(keys)
+}
+
+#[derive(Default)]
+struct ComboTracker {
+    pressed: HashSet<KeyCode>,
+    active: bool,
+}
+
+impl ComboTracker {
+    fn handle(&mut self, code: KeyCode, value: i32, trigger: &[KeyCode]) -> Option<bool> {
+        match value {
+            1 => {
+                self.pressed.insert(code);
+                if !self.active && !trigger.is_empty() && trigger.iter().all(|k| self.pressed.contains(k)) {
+                    self.active = true;
+                    return Some(true);
+                }
+                None
+            }
+            0 => {
+                self.pressed.remove(&code);
+                if self.active && trigger.iter().any(|k| !self.pressed.contains(k)) {
+                    self.active = false;
+                    return Some(false);
+                }
+                None
+            }
+            _ => None, // Ignore key auto-repeat (2).
+        }
     }
 }
 
@@ -207,6 +308,7 @@ fn read_loop(
     inbox: Sender<Input>,
     exited: UnboundedSender<()>,
 ) {
+    let mut tracker = ComboTracker::default();
     loop {
         let events = match device.fetch_events() {
             Ok(events) => events,
@@ -238,23 +340,19 @@ fn read_loop(
                         continue;
                     }
                 };
-                let is_trigger = match key_from_name(&configured) {
-                    Ok(trigger) => trigger == code,
+                let trigger = match keys_from_spec(&configured) {
+                    Ok(keys) => keys,
                     Err(problem) => {
                         eprintln!("hotkey: {problem}");
-                        false
+                        continue;
                     }
                 };
-                if !is_trigger {
-                    continue;
-                }
-
-                let msg = match value {
-                    1 => Some(Input::Press { at: Instant::now() }),
-                    0 => Some(Input::Release { at: Instant::now() }),
-                    _ => None, // Ignore key auto-repeat (2).
-                };
-                if let Some(input) = msg {
+                if let Some(pressed) = tracker.handle(code, value, &trigger) {
+                    let input = if pressed {
+                        Input::Press { at: Instant::now() }
+                    } else {
+                        Input::Release { at: Instant::now() }
+                    };
                     if inbox.send(input).is_err() {
                         return;
                     }
@@ -279,6 +377,39 @@ mod tests {
     #[test]
     fn rejects_unknown_trigger_keys() {
         assert!(key_from_name("NotAKey").is_err());
+    }
+
+    #[test]
+    fn parses_multi_key_combos_up_to_three_keys() {
+        assert_eq!(
+            keys_from_spec("ControlLeft+Space"),
+            Ok(vec![KeyCode::KEY_LEFTCTRL, KeyCode::KEY_SPACE])
+        );
+        assert_eq!(
+            keys_from_spec("ControlLeft+AltLeft+KeyD"),
+            Ok(vec![
+                KeyCode::KEY_LEFTCTRL,
+                KeyCode::KEY_LEFTALT,
+                KeyCode::KEY_D
+            ])
+        );
+        assert!(keys_from_spec("ControlLeft+AltLeft+ShiftLeft+Space").is_err());
+        assert!(keys_from_spec("ControlLeft+ControlLeft").is_err());
+        assert!(keys_from_spec("ControlLeft+").is_err());
+    }
+
+    #[test]
+    fn combo_tracker_fires_press_when_all_held_and_release_when_any_lifted() {
+        let mut tracker = ComboTracker::default();
+        let trigger = vec![KeyCode::KEY_LEFTCTRL, KeyCode::KEY_SPACE];
+
+        assert_eq!(tracker.handle(KeyCode::KEY_LEFTCTRL, 1, &trigger), None);
+        assert_eq!(tracker.handle(KeyCode::KEY_SPACE, 1, &trigger), Some(true));
+        // Auto-repeat does not re-trigger.
+        assert_eq!(tracker.handle(KeyCode::KEY_SPACE, 2, &trigger), None);
+        // Lifting either key releases the combo; lifting the second does not double-release.
+        assert_eq!(tracker.handle(KeyCode::KEY_SPACE, 0, &trigger), Some(false));
+        assert_eq!(tracker.handle(KeyCode::KEY_LEFTCTRL, 0, &trigger), None);
     }
 
     #[test]

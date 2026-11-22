@@ -1214,8 +1214,245 @@ body.pill-body {
   overflow-wrap: anywhere;
 }
 
+/* Standard toggle switch & shortcut recorder */
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 38px;
+  height: 22px;
+  padding: 2px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--panel);
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), transform 120ms var(--ease-out);
+}
+
+.switch:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.switch[aria-checked="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+.switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.switch-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 160ms var(--ease-out), background-color 160ms var(--ease-out);
+}
+
+.switch[aria-checked="true"] .switch-thumb {
+  transform: translateX(16px);
+  background: var(--paper);
+}
+
+.shortcut-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-control .button-quiet {
+  margin-top: 0;
+}
+
+.shortcut-kbd {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.75rem;
+}
+
+/* Insights */
+
+.insights-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.insights-body {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  margin-top: 28px;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.kpi {
+  padding: 16px 18px;
+  border-right: 1px solid var(--rule);
+}
+
+.kpi:last-child {
+  border-right: 0;
+}
+
+.kpi-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.kpi-value {
+  margin: 6px 0 0;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 1.75rem;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-sub {
+  margin: 6px 0 0;
+  color: var(--faint);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.insights-block {
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+}
+
+.insights-block-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.insights-heading {
+  margin: 0 0 10px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.insights-block-head .insights-heading {
+  margin-bottom: 0;
+}
+
+.insights-meta {
+  color: var(--faint);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.heatmap {
+  display: grid;
+  grid-template-columns: repeat(28, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.heatmap-cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: transparent;
+}
+
+.heatmap-level-1 {
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  border-color: transparent;
+}
+
+.heatmap-level-2 {
+  background: color-mix(in srgb, var(--ink) 52%, transparent);
+  border-color: transparent;
+}
+
+.heatmap-level-3 {
+  background: var(--ink);
+  border-color: transparent;
+}
+
+.insights-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.insights-stats {
+  margin: 0;
+  padding: 0;
+}
+
+.insights-stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.insights-stat-row dt {
+  color: var(--muted);
+}
+
+.insights-stat-row dd {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kpi:nth-child(2) {
+    border-right: 0;
+  }
+
+  .kpi:nth-child(1),
+  .kpi:nth-child(2) {
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .insights-split {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .wizard {
     animation: none;
+  }
+
+  .switch,
+  .switch-thumb {
+    transition: none;
   }
 }
