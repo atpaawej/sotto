@@ -12,7 +12,7 @@ use std::{
 
 use reqwest::blocking::multipart::{Form, Part};
 
-use crate::audio::MarkedReader;
+use crate::{audio::MarkedReader, config::ProviderId};
 
 /// What the user asked us to send.
 pub struct Request<'a> {
@@ -71,6 +71,67 @@ pub trait Transcriber {
     fn transcribe(&self, request: &Request<'_>) -> Result<Transcript, TranscribeError>;
 }
 
+/// The adapter for a configured provider. Callers choose a provider; only this
+/// seam knows an endpoint, an auth header and a request shape.
+pub fn transcriber_for(provider: ProviderId) -> Box<dyn Transcriber> {
+    match provider {
+        ProviderId::Groq => Box::new(Groq::new()),
+        ProviderId::ElevenLabs => Box::new(ElevenLabs::new()),
+    }
+}
+
+/// The model each adapter uses, for History rows written before a reply exists.
+pub fn model_for(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::Groq => Groq::DEFAULT_MODEL,
+        ProviderId::ElevenLabs => ElevenLabs::DEFAULT_MODEL,
+    }
+}
+
+/// Tests a key by making a real request with a short silent WAV. The provider
+/// accepts or rejects the key on the same path a dictation uses; no microphone
+/// and no words are involved.
+pub fn key_test(transcriber: &dyn Transcriber, key: &str) -> Result<Transcript, TranscribeError> {
+    let wav = short_silence()?;
+    let uploaded = Arc::new(Mutex::new(None));
+    transcriber.transcribe(&Request {
+        wav: &wav,
+        api_key: key,
+        language: Some("en"),
+        prompt: None,
+        uploaded: &uploaded,
+    })
+}
+
+/// One second of silence, encoded the same way a real recording is.
+fn short_silence() -> Result<Vec<u8>, TranscribeError> {
+    use std::io::Cursor;
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: crate::audio::TARGET_SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut out = Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut out, spec).map_err(|error| TranscribeError::Request {
+        detail: format!("could not build the key test's WAV: {error}"),
+    })?;
+    for _ in 0..crate::audio::TARGET_SAMPLE_RATE {
+        writer
+            .write_sample(0i16)
+            .map_err(|error| TranscribeError::Request {
+                detail: format!("could not write the key test's WAV: {error}"),
+            })?;
+    }
+    writer
+        .finalize()
+        .map_err(|error| TranscribeError::Request {
+            detail: format!("could not finish the key test's WAV: {error}"),
+        })?;
+    Ok(out.into_inner())
+}
+
 /// Groq's OpenAI-compatible transcription endpoint.
 #[derive(Debug, Clone)]
 pub struct Groq {
@@ -97,10 +158,6 @@ impl Groq {
             endpoint: endpoint.into(),
             model: Self::DEFAULT_MODEL.to_owned(),
         }
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
     }
 
     fn form(&self, request: &Request<'_>) -> Result<Form, TranscribeError> {
@@ -212,10 +269,6 @@ impl ElevenLabs {
             endpoint: endpoint.into(),
             model: Self::DEFAULT_MODEL.to_owned(),
         }
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
     }
 
     fn form(&self, request: &Request<'_>) -> Result<Form, TranscribeError> {
@@ -607,5 +660,53 @@ mod tests {
             uploaded: &uploaded,
         });
         assert!(matches!(result, Err(TranscribeError::MissingKey)));
+    }
+
+    /// The wizard's test and the Speech section's test run through this seam.
+    fn adapter_at(provider: ProviderId, endpoint: &str) -> Box<dyn Transcriber> {
+        match provider {
+            ProviderId::Groq => Box::new(Groq::at(endpoint)),
+            ProviderId::ElevenLabs => Box::new(ElevenLabs::at(endpoint)),
+        }
+    }
+
+    #[test]
+    fn a_key_test_sends_a_real_wav_for_either_provider() {
+        for provider in [ProviderId::Groq, ProviderId::ElevenLabs] {
+            let path = match provider {
+                ProviderId::Groq => "/openai/v1/audio/transcriptions",
+                ProviderId::ElevenLabs => "/v1/speech-to-text",
+            };
+            let (endpoint, captured, handle) = mock_at(path, 200, r#"{"text":""}"#);
+            let adapter = adapter_at(provider, &endpoint);
+
+            key_test(adapter.as_ref(), "test-key").expect("key test");
+            let request = captured.recv().expect("a request");
+            handle.join().expect("mock thread");
+
+            assert_eq!(request.path, path);
+            let body = String::from_utf8_lossy(&request.body);
+            assert!(body.contains("name=\"file\""), "a real WAV part is uploaded");
+            assert!(body.contains("RIFF"), "the WAV header is in the part");
+        }
+    }
+
+    #[test]
+    fn a_rejected_key_fails_the_key_test_for_either_provider() {
+        for provider in [ProviderId::Groq, ProviderId::ElevenLabs] {
+            let (endpoint, _captured, handle) = mock_at("/key-test", 401, r#"{"error":"bad key"}"#);
+            let adapter = adapter_at(provider, &endpoint);
+
+            let result = key_test(adapter.as_ref(), "wrong-key");
+            handle.join().expect("mock thread");
+
+            assert!(matches!(result, Err(TranscribeError::Rejected)));
+        }
+    }
+
+    #[test]
+    fn each_provider_names_the_model_its_adapter_uses() {
+        assert_eq!(model_for(ProviderId::Groq), Groq::DEFAULT_MODEL);
+        assert_eq!(model_for(ProviderId::ElevenLabs), ElevenLabs::DEFAULT_MODEL);
     }
 }
