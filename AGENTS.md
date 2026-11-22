@@ -28,6 +28,10 @@ Five canonical roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-fo
 
 Single-context: `GLOSSARY.md` plus `docs/adr/` at the repo root. Read both before working. See `docs/agents/domain.md`.
 
+### Skill routing
+
+Load the matching skill before starting UI, codebase design, PR, or agent-doc work. See `docs/agents/skills.md`.
+
 ### Grilling
 
 When grilling the user (e.g. `/grill`), ask one question at a time and wait for the answer before asking the next.
