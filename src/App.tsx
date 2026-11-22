@@ -124,7 +124,16 @@ export default function App() {
   return (
     <div className="app">
       <nav className="sidebar" aria-label="Settings">
-        <p className="wordmark">Sotto</p>
+        <div className="brand-header">
+          <img
+            src="/logo.png"
+            alt=""
+            className="brand-logo"
+            width={24}
+            height={24}
+          />
+          <p className="wordmark">Sotto</p>
+        </div>
         <ul className="nav">
           {SECTIONS.map((section) => (
             <li key={section.id}>
