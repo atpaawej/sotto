@@ -455,7 +455,11 @@ pub fn run() {
             }
 
             let (inbox, inbox_rx) = mpsc::channel::<Input>();
-            let bridge = inject::bridge(Arc::clone(&access), inbox.clone());
+            let bridge = inject::bridge(
+                Arc::clone(&access),
+                inbox.clone(),
+                config.text_injectors.clone(),
+            );
             let retry_inject = bridge.retry.clone();
             let copy = bridge.copy.clone();
             let view = session::shared_view();
