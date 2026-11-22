@@ -129,8 +129,8 @@ export default function App() {
             src="/logo.png"
             alt=""
             className="brand-logo"
-            width={24}
-            height={24}
+            width={30}
+            height={30}
           />
           <p className="wordmark">Sotto</p>
         </div>

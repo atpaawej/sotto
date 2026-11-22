@@ -212,6 +212,11 @@ pub struct Session {
     /// A retry with the other provider compares results in History; it must
     /// not paste the second result into the focused app.
     no_inject_next: bool,
+    /// Wall-clock start of the post-recording pipeline (key release / stop)
+    /// for end-to-end latency logging.
+    pipeline_started: Option<Instant>,
+    /// Time spent saving the Recording to History before transcription.
+    history_record_ms: u64,
 }
 
 impl Session {
@@ -232,6 +237,8 @@ impl Session {
             pending_storage_failure: None,
             busy_until: None,
             no_inject_next: false,
+            pipeline_started: None,
+            history_record_ms: 0,
         }
     }
 
@@ -380,6 +387,8 @@ impl Session {
     /// Stops the microphone, saves the Recording, and asks the runner to
     /// transcribe it.
     fn finish(&mut self, _at: Instant) -> Vec<Effect> {
+        self.pipeline_started = Some(Instant::now());
+        self.history_record_ms = 0;
         self.last.injected = false;
         let captured = match self.ports.capture.stop() {
             Ok(captured) => captured,
@@ -421,6 +430,7 @@ impl Session {
         // The Recording is saved before the provider is asked. If the save
         // fails, the words are still transcribed and inserted; the warning is
         // attached to the result rather than losing the sentence.
+        let save_started = Instant::now();
         let (id, storage_failure) = match self.ports.history.record(&captured) {
             Ok(StoredRecording { id }) => (Some(id), None),
             Err(failure) => {
@@ -428,6 +438,7 @@ impl Session {
                 (None, Some(failure))
             }
         };
+        self.history_record_ms = save_started.elapsed().as_millis() as u64;
         self.pending_storage_failure = storage_failure;
 
         self.state = State::Working { cancelled: false };
@@ -524,25 +535,44 @@ impl Session {
                     return self.hint("No words came back");
                 }
 
+                let inject_started = Instant::now();
                 let (outcome, injection_failure) = if inject {
                     devlog::step(
                         "inject",
                         format!("injecting {} bytes into focused app", text.len()),
                     );
-                    match self.ports.injector.inject(&text) {
+                    let res = self.ports.injector.inject(&text);
+                    let inject_ms = inject_started.elapsed().as_millis() as u64;
+                    let end_to_end_ms = self
+                        .pipeline_started
+                        .take()
+                        .map(|started| started.elapsed().as_millis() as u64)
+                        .unwrap_or(attempt.timings.total_ms + inject_ms);
+                    let status = if res.is_ok() { "ok" } else { "inject failed" };
+                    devlog::step(
+                        "latency",
+                        format!(
+                            "total={end_to_end_ms}ms ({status}) | stop={}ms encode={}ms save={}ms upload={}ms transcribe={}ms cleanup={}ms inject={inject_ms}ms",
+                            attempt.timings.stop_ms,
+                            attempt.timings.encode_ms,
+                            self.history_record_ms,
+                            attempt.timings.upload_ms,
+                            attempt.timings.provider_ms,
+                            attempt.timings.cleanup_ms,
+                        ),
+                    );
+                    match res {
                         Ok(()) => {
-                            devlog::step(
-                                "inject",
-                                format!("pasted successfully (total={}ms)", attempt.timings.total_ms),
-                            );
+                            devlog::step("inject", format!("pasted successfully in {inject_ms}ms"));
                             (Injection::Inserted, None)
                         }
                         Err(reason) => {
-                            devlog::step("inject", format!("paste failed: {reason}"));
+                            devlog::step("inject", format!("paste failed in {inject_ms}ms: {reason}"));
                             (Injection::Blocked, Some(failure::injection(reason)))
                         }
                     }
                 } else {
+                    self.pipeline_started = None;
                     devlog::step("inject", "skipped (retry-other comparison)");
                     (Injection::NotAttempted, None)
                 };
