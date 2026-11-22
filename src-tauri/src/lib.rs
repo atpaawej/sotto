@@ -586,20 +586,30 @@ fn start_session(
                         let cleaner = Arc::clone(&shared_cleaner);
                         let reply = effects.clone();
                         thread::spawn(move || {
-                            let result = match current_config(&loaded) {
-                                Ok(config) => Dictation::transcribe_with(
-                                    &config,
-                                    &captured,
-                                    provider.unwrap_or(config.active_provider),
-                                    cleaner
-                                        .as_ref()
-                                        .as_ref()
-                                        .map(|c| c as &dyn cleanup::Cleaner),
-                                )
-                                .map_err(failure::from_dictation),
-                                Err(problem) => Err(failure::settings(problem)),
+                            let (result, used_provider) = match current_config(&loaded) {
+                                Ok(config) => {
+                                    let used = provider.unwrap_or(config.active_provider);
+                                    (
+                                        Dictation::transcribe_with(
+                                            &config,
+                                            &captured,
+                                            used,
+                                            cleaner
+                                                .as_ref()
+                                                .as_ref()
+                                                .map(|c| c as &dyn cleanup::Cleaner),
+                                        )
+                                        .map_err(failure::from_dictation),
+                                        Some(used),
+                                    )
+                                }
+                                Err(problem) => (Err(failure::settings(problem)), None),
                             };
-                            if let Err(error) = reply.send(Input::Transcript { id, result }) {
+                            if let Err(error) = reply.send(Input::Transcript {
+                                id,
+                                result: Box::new(result),
+                                provider: used_provider,
+                            }) {
                                 eprintln!(
                                     "session: the dictation thread stopped before the reply: {error}"
                                 );

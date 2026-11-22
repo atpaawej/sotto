@@ -652,7 +652,12 @@ pub trait HistoryPort {
         injection: Injection,
         failure: Option<&Failure>,
     ) -> Result<(), Failure>;
-    fn fail(&mut self, id: &str, failure: &Failure) -> Result<(), Failure>;
+    fn fail(
+        &mut self,
+        id: &str,
+        failure: &Failure,
+        provider: Option<ProviderId>,
+    ) -> Result<(), Failure>;
     fn retry_source(&mut self, id: &str) -> Result<RetrySource, Failure>;
     /// Re-transcribes the Recording with the other provider. The original
     /// result is kept; the retry is a new row that shares the Recording.
@@ -790,7 +795,12 @@ impl History {
             .map_err(|error| Failure::storage(&error))
     }
 
-    pub fn fail(&self, id: &str, failure: &Failure) -> Result<(), Failure> {
+    pub fn fail(
+        &self,
+        id: &str,
+        failure: &Failure,
+        provider: Option<ProviderId>,
+    ) -> Result<(), Failure> {
         let mut entry = self
             .store
             .get(id)
@@ -802,6 +812,12 @@ impl History {
                 )
             })?;
 
+        // A failure still knows which provider tried. Without this, a failed
+        // row cannot be retried with the other provider.
+        if let Some(provider) = provider {
+            entry.provider = provider.as_str().to_owned();
+            entry.model = model_for(provider).to_owned();
+        }
         entry.failure = Some(failure.clone());
         entry.injection = Injection::NotAttempted;
         entry.finished_at_ms = Some(now_ms().map_err(|error| Failure::storage(&error))?);
@@ -1007,8 +1023,13 @@ impl HistoryPort for Arc<History> {
         (**self).complete(id, attempt, injection, failure)
     }
 
-    fn fail(&mut self, id: &str, failure: &Failure) -> Result<(), Failure> {
-        (**self).fail(id, failure)
+    fn fail(
+        &mut self,
+        id: &str,
+        failure: &Failure,
+        provider: Option<ProviderId>,
+    ) -> Result<(), Failure> {
+        (**self).fail(id, failure, provider)
     }
 
     fn retry_source(&mut self, id: &str) -> Result<RetrySource, Failure> {
@@ -1288,7 +1309,9 @@ mod tests {
         let stored = history.record(&captured()).expect("record");
         let failure = Failure::new(FailureKind::Network, "offline");
 
-        history.fail(&stored.id, &failure).expect("fail");
+        history
+            .fail(&stored.id, &failure, Some(ProviderId::Groq))
+            .expect("fail");
         let entries = history.list("").expect("list");
         assert_eq!(
             entries[0].failure.as_ref().map(|f| f.kind),
@@ -1298,6 +1321,35 @@ mod tests {
         let source = history.retry_source(&stored.id).expect("retry source");
         assert_eq!(source.captured.wav, b"RIFFfake");
         assert_eq!(source.captured.duration_ms, 2_000);
+    }
+
+    #[test]
+    fn a_failed_entry_still_names_its_provider_for_the_other_retry() {
+        let (_dir, history) = history();
+        let stored = history.record(&captured()).expect("record");
+        history
+            .fail(
+                &stored.id,
+                &Failure::new(FailureKind::Network, "offline"),
+                Some(ProviderId::Groq),
+            )
+            .expect("fail");
+
+        let entry = history.entry(&stored.id).expect("entry");
+        assert_eq!(entry.provider, "groq");
+        assert_eq!(
+            entry.failure.as_ref().map(|failure| failure.kind),
+            Some(FailureKind::Network)
+        );
+
+        let source = history
+            .retry_other(&stored.id)
+            .expect("retry with the other provider");
+
+        assert_eq!(source.provider, Some(ProviderId::ElevenLabs));
+        let entries = history.list("").expect("list");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.provider == "eleven_labs"));
     }
 
     #[test]

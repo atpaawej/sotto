@@ -59,7 +59,9 @@ pub enum Input {
     /// to; it is absent only when the Recording itself could not be saved.
     Transcript {
         id: Option<String>,
-        result: Result<Attempt, Failure>,
+        result: Box<Result<Attempt, Failure>>,
+        /// The provider that made the attempt, even when no text came back.
+        provider: Option<ProviderId>,
     },
     /// Re-transcribe a Recording already on disk. `None` retries the last
     /// failed dictation, which is what the Pill's Retry button means.
@@ -257,7 +259,11 @@ impl Session {
                 State::Working { .. } => Vec::new(),
             },
             Input::Cancel => self.cancel(),
-            Input::Transcript { id, result } => self.transcript(id, result),
+            Input::Transcript {
+                id,
+                result,
+                provider,
+            } => self.transcript(id, result, provider),
             Input::Retry { id } => self.retry(id),
             Input::RetryOther { id } => self.retry_other(id),
             Input::CapabilityFailed { failure } => self.capability_failed(failure),
@@ -394,7 +400,12 @@ impl Session {
         }
     }
 
-    fn transcript(&mut self, id: Option<String>, result: Result<Attempt, Failure>) -> Vec<Effect> {
+    fn transcript(
+        &mut self,
+        id: Option<String>,
+        result: Box<Result<Attempt, Failure>>,
+        provider: Option<ProviderId>,
+    ) -> Vec<Effect> {
         let cancelled = match self.state {
             State::Working { cancelled } => cancelled,
             // A reply that arrives after a cancel is stale by definition.
@@ -405,7 +416,7 @@ impl Session {
 
         if cancelled {
             self.pending_storage_failure = None;
-            match result {
+            match *result {
                 Ok(attempt) => {
                     if let Some(id) = id {
                         if let Err(failure) = self.ports.history.complete(
@@ -421,7 +432,7 @@ impl Session {
                 Err(failure) => {
                     failure.log();
                     if let Some(id) = id {
-                        if let Err(error) = self.ports.history.fail(&id, &failure) {
+                        if let Err(error) = self.ports.history.fail(&id, &failure, provider) {
                             error.log();
                         }
                     }
@@ -430,7 +441,7 @@ impl Session {
             return Vec::new();
         }
 
-        match result {
+        match *result {
             Ok(attempt) => {
                 let text = attempt.cleaned.trim().to_owned();
                 if text.is_empty() {
@@ -503,7 +514,7 @@ impl Session {
             }
             Err(failure) => {
                 let history_error = match &id {
-                    Some(id) => self.ports.history.fail(id, &failure).err(),
+                    Some(id) => self.ports.history.fail(id, &failure, provider).err(),
                     None => None,
                 };
                 let storage_error = self.pending_storage_failure.take();
@@ -786,7 +797,12 @@ mod tests {
             Ok(())
         }
 
-        fn fail(&mut self, id: &str, failure: &Failure) -> Result<(), Failure> {
+        fn fail(
+            &mut self,
+            id: &str,
+            failure: &Failure,
+            _provider: Option<ProviderId>,
+        ) -> Result<(), Failure> {
             self.0.take().failed.push((id.to_owned(), failure.clone()));
             Ok(())
         }
@@ -852,7 +868,9 @@ mod tests {
     fn transcribed(text: &str) -> Input {
         Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Ok(attempt(text)),
+            result: Box::new(Ok(attempt(text)),
+            ),
+            provider: None,
         }
     }
 
@@ -893,7 +911,9 @@ mod tests {
         att.cleanup_failure = Some(Failure::new(FailureKind::RateLimited, "rate limited"));
         let effects = session.handle(Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Ok(att),
+            result: Box::new(Ok(att),
+            ),
+            provider: None,
         });
 
         let snapshot = fake.take();
@@ -1109,7 +1129,9 @@ mod tests {
         let failure = Failure::new(FailureKind::Network, "the provider could not be reached");
         session.handle(Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Err(failure),
+            result: Box::new(Err(failure),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         assert!(fake.take().injected.is_empty());
@@ -1134,7 +1156,9 @@ mod tests {
         press_and_release(&mut session);
         session.handle(Input::Transcript {
             id: Some(ID.to_owned()),
-            result: Err(Failure::new(FailureKind::Network, "offline")),
+            result: Box::new(Err(Failure::new(FailureKind::Network, "offline")),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         let effects = session.handle(Input::Retry { id: None });
@@ -1184,7 +1208,9 @@ mod tests {
 
         session.handle(Input::Transcript {
             id: Some("other-dictation-1".to_owned()),
-            result: Ok(attempt("Second provider.")),
+            result: Box::new(Ok(attempt("Second provider.")),
+            ),
+            provider: Some(ProviderId::ElevenLabs),
         });
 
         assert_eq!(
@@ -1220,10 +1246,11 @@ mod tests {
 
         session.handle(Input::Transcript {
             id: Some(id.clone()),
-            result: Err(Failure::new(
+            result: Box::new(Err(Failure::new(
                 FailureKind::Network,
                 "the provider could not be reached",
-            )),
+            ))),
+            provider: Some(ProviderId::Groq),
         });
         assert_eq!(
             history
@@ -1245,7 +1272,9 @@ mod tests {
 
         session.handle(Input::Transcript {
             id: Some(id.clone()),
-            result: Ok(attempt("Back online.")),
+            result: Box::new(Ok(attempt("Back online.")),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         assert_eq!(fake.take().injected, vec!["Back online.".to_owned()]);
@@ -1303,7 +1332,9 @@ mod tests {
         press_and_release(&mut session);
         let effects = session.handle(Input::Transcript {
             id: None,
-            result: Ok(attempt("Keep these words.")),
+            result: Box::new(Ok(attempt("Keep these words.")),
+            ),
+            provider: Some(ProviderId::Groq),
         });
 
         assert_eq!(fake.take().injected, vec!["Keep these words.".to_owned()]);
