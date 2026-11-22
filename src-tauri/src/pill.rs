@@ -13,9 +13,12 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Emitter, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
-use crate::session::{SurfacePort, View};
+use crate::{
+    config::PillVisibility,
+    session::{Phase, SurfacePort, View},
+};
 
 const PILL_WIDTH: i32 = 380;
 const PILL_HEIGHT: f64 = 128.0;
@@ -26,7 +29,7 @@ const MARGIN: i32 = 64;
 
 /// Creates the persistent pill window at bottom centre, click-through and
 /// non-focusable. Must be called on the main thread during app setup.
-pub fn create(app: &AppHandle) -> Result<(), String> {
+pub fn create(app: &AppHandle, visibility: PillVisibility) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "pill",
@@ -56,16 +59,50 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
         gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Notification);
     }
 
-    window
-        .show()
-        .map_err(|error| format!("the pill window could not be shown: {error}"))?;
     place(&window);
     let _ = window.set_always_on_top(true);
     let _ = window.set_visible_on_all_workspaces(true);
     // Keep cursor events enabled so hover tooltips, click-to-dictate, Cancel,
     // and error dismiss work; `accept_focus(false)` prevents stealing focus.
     let _ = window.set_ignore_cursor_events(false);
+
+    if visibility == PillVisibility::Always {
+        window
+            .show()
+            .map_err(|error| format!("the pill window could not be shown: {error}"))?;
+        place(&window);
+    }
     Ok(())
+}
+
+/// Shows or hides the pill window to match the user's `PillVisibility` setting
+/// and the current dictation phase.
+pub fn sync_visibility(app: &AppHandle, visibility: PillVisibility, phase: Phase) {
+    let Some(window) = app.get_webview_window("pill") else {
+        return;
+    };
+    match visibility {
+        PillVisibility::Disabled => {
+            let _ = window.hide();
+        }
+        PillVisibility::Always => {
+            let _ = window.show();
+            place(&window);
+        }
+        PillVisibility::ActiveOnly => {
+            if phase != Phase::Idle {
+                let _ = window.show();
+                place(&window);
+            }
+        }
+    }
+}
+
+/// Hides the pill window after an `ActiveOnly` fade-out completes.
+pub fn hide(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("pill") {
+        let _ = window.hide();
+    }
 }
 
 pub struct PillSurface {
