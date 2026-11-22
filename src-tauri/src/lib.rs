@@ -7,6 +7,7 @@
 mod audio;
 mod cleanup;
 mod config;
+mod devlog;
 mod dictation;
 mod failure;
 mod history;

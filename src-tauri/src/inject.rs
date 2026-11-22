@@ -379,7 +379,13 @@ fn deliver(
                     continue;
                 }
                 match ydotool.inject(text) {
-                    Ok(()) => return Ok(YDOTOOL.to_owned()),
+                    Ok(()) => {
+                        crate::devlog::step(
+                            "inject",
+                            format!("pasted {} bytes via ydotool", text.len()),
+                        );
+                        return Ok(YDOTOOL.to_owned());
+                    }
                     Err(error) => tried.push(error),
                 }
             }
@@ -413,7 +419,10 @@ fn paste(
     let previous = ensure_clipboard(clipboard)?.get_text().ok();
     let delivered = copy(clipboard, text).and_then(|()| {
         thread::sleep(CLIPBOARD_SETTLE);
-        eprintln!("inject: pasting {} bytes via uinput", text.len());
+        crate::devlog::step(
+            "inject",
+            format!("pasting {} bytes via clipboard+uinput (Ctrl+V)", text.len()),
+        );
         keyboard::tap(device, &keyboard::PASTE)
     });
     // The user's clipboard is saved and restored on a best-effort basis: the
