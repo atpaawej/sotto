@@ -1,9 +1,9 @@
 //! Speech to text, behind one seam.
 //!
 //! [`Transcriber`] takes a WAV and an API key and gives back text or a typed
-//! failure. [`Groq`] is the only adapter in this build; the seam exists so a
-//! second provider costs an adapter rather than a rewrite, and so every test
-//! can run against a local server instead of the network.
+//! failure. [`Groq`] and [`ElevenLabs`] are adapters behind it, so choosing a
+//! provider costs no changes to the session, and every adapter is tested
+//! against a local server instead of the network.
 
 use std::{
     sync::{Arc, Mutex},
@@ -187,6 +187,117 @@ impl Transcriber for Groq {
     }
 }
 
+/// ElevenLabs' Scribe transcription endpoint.
+#[derive(Debug, Clone)]
+pub struct ElevenLabs {
+    endpoint: String,
+    model: String,
+}
+
+impl ElevenLabs {
+    pub const DEFAULT_ENDPOINT: &'static str = "https://api.elevenlabs.io/v1/speech-to-text";
+    pub const DEFAULT_MODEL: &'static str = "scribe_v3";
+
+    pub fn new() -> Self {
+        Self {
+            endpoint: Self::DEFAULT_ENDPOINT.to_owned(),
+            model: Self::DEFAULT_MODEL.to_owned(),
+        }
+    }
+
+    /// Points the adapter somewhere else. Tests use this; nothing else should.
+    #[cfg(test)]
+    pub fn at(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            model: Self::DEFAULT_MODEL.to_owned(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn form(&self, request: &Request<'_>) -> Result<Form, TranscribeError> {
+        let part = Part::reader_with_length(
+            MarkedReader::new(request.wav.to_vec(), Arc::clone(request.uploaded)),
+            request.wav.len() as u64,
+        )
+        .file_name("speech.wav")
+        .mime_str("audio/wav")
+        .map_err(|error| TranscribeError::Request {
+            detail: error.to_string(),
+        })?;
+
+        let mut form = Form::new()
+            .text("model_id", self.model.clone())
+            .part("file", part);
+
+        if let Some(language) = request.language {
+            form = form.text("language_code", language.to_owned());
+        }
+        // Scribe has no Whisper-style prompt field. Dictionary terms reach
+        // Cleanup after transcription, not the provider.
+        Ok(form)
+    }
+}
+
+impl Default for ElevenLabs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ElevenLabsReply {
+    text: String,
+}
+
+impl Transcriber for ElevenLabs {
+    fn transcribe(&self, request: &Request<'_>) -> Result<Transcript, TranscribeError> {
+        if request.api_key.trim().is_empty() {
+            return Err(TranscribeError::MissingKey);
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|error| TranscribeError::Request {
+                detail: error.to_string(),
+            })?;
+
+        let response = client
+            .post(&self.endpoint)
+            .header("xi-api-key", request.api_key)
+            .multipart(self.form(request)?)
+            .send()
+            .map_err(|source| TranscribeError::Network { source })?;
+
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .map_err(|source| TranscribeError::Network { source })?;
+
+        match status {
+            200..=299 => {
+                let reply: ElevenLabsReply =
+                    serde_json::from_str(&body).map_err(|error| TranscribeError::Malformed {
+                        detail: format!("{error}; body was {}", summarize(&body)),
+                    })?;
+                Ok(Transcript {
+                    text: reply.text.trim().to_owned(),
+                })
+            }
+            401 | 403 => Err(TranscribeError::Rejected),
+            429 => Err(TranscribeError::RateLimited),
+            other => Err(TranscribeError::Unavailable {
+                status: other,
+                message: summarize(&body),
+            }),
+        }
+    }
+}
+
 fn summarize(body: &str) -> String {
     let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() > 300 {
@@ -205,12 +316,22 @@ mod tests {
     struct Captured {
         path: String,
         authorization: Option<String>,
+        api_key: Option<String>,
         content_type: Option<String>,
         body: Vec<u8>,
     }
 
-    /// Serves exactly one request, then answers with `status` and `body`.
+    /// Groq's endpoint, for the tests that only care about Groq.
     fn mock(
+        status: u16,
+        reply: &'static str,
+    ) -> (String, mpsc::Receiver<Captured>, std::thread::JoinHandle<()>) {
+        mock_at("/openai/v1/audio/transcriptions", status, reply)
+    }
+
+    /// Serves exactly one request at `path`, then answers with `status` and `body`.
+    fn mock_at(
+        path: &'static str,
         status: u16,
         reply: &'static str,
     ) -> (String, mpsc::Receiver<Captured>, std::thread::JoinHandle<()>) {
@@ -245,6 +366,7 @@ mod tests {
             let _ = tx.send(Captured {
                 path: request.url().to_owned(),
                 authorization: header("authorization"),
+                api_key: header("xi-api-key"),
                 content_type: header("content-type"),
                 body,
             });
@@ -254,7 +376,7 @@ mod tests {
         });
 
         (
-            format!("http://127.0.0.1:{port}/openai/v1/audio/transcriptions"),
+            format!("http://127.0.0.1:{port}{path}"),
             rx,
             handle,
         )
@@ -378,5 +500,112 @@ mod tests {
         let body = String::from_utf8_lossy(&request.body);
         assert!(body.contains("name=\"prompt\""));
         assert!(body.contains("Sotto, Wayland"));
+    }
+
+    fn ask_eleven(endpoint: &str, key: &str) -> Result<Transcript, TranscribeError> {
+        let wav = b"RIFFmock".to_vec();
+        let uploaded = Arc::new(Mutex::new(None));
+        ElevenLabs::at(endpoint).transcribe(&Request {
+            wav: &wav,
+            api_key: key,
+            language: Some("en"),
+            prompt: None,
+            uploaded: &uploaded,
+        })
+    }
+
+    #[test]
+    fn elevenlabs_request_looks_like_scribe_expects_and_the_text_comes_back() {
+        let (endpoint, captured, handle) =
+            mock_at("/v1/speech-to-text", 200, r#"{"text":"  hello there  "}"#);
+
+        let transcript = ask_eleven(&endpoint, "xi-test").expect("transcribe");
+        let request = captured.recv().expect("the adapter made a request");
+        handle.join().expect("mock thread");
+
+        assert_eq!(transcript.text, "hello there");
+        assert_eq!(request.path, "/v1/speech-to-text");
+        assert_eq!(request.api_key.as_deref(), Some("xi-test"));
+        assert!(request.authorization.is_none(), "Scribe uses xi-api-key, not Bearer");
+        assert!(request
+            .content_type
+            .as_deref()
+            .is_some_and(|value| value.starts_with("multipart/form-data")));
+
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("name=\"model_id\""));
+        assert!(body.contains(ElevenLabs::DEFAULT_MODEL));
+        assert!(body.contains("name=\"file\"; filename=\"speech.wav\""));
+        assert!(body.contains("name=\"language_code\""));
+        assert!(body.contains("RIFFmock"), "the audio bytes are the part's body");
+    }
+
+    #[test]
+    fn elevenlabs_rejected_key_is_its_own_failure() {
+        let (endpoint, _captured, handle) =
+            mock_at("/v1/speech-to-text", 401, r#"{"detail":"invalid api key"}"#);
+        let result = ask_eleven(&endpoint, "xi-wrong");
+        handle.join().expect("mock thread");
+
+        assert!(matches!(result, Err(TranscribeError::Rejected)));
+    }
+
+    #[test]
+    fn elevenlabs_rate_limiting_is_its_own_failure() {
+        let (endpoint, _captured, handle) =
+            mock_at("/v1/speech-to-text", 429, r#"{"detail":"slow down"}"#);
+        let result = ask_eleven(&endpoint, "xi-test");
+        handle.join().expect("mock thread");
+
+        assert!(matches!(result, Err(TranscribeError::RateLimited)));
+    }
+
+    #[test]
+    fn elevenlabs_server_error_keeps_the_status_and_the_body() {
+        let (endpoint, _captured, handle) = mock_at(
+            "/v1/speech-to-text",
+            503,
+            r#"{"detail":"upstream unavailable"}"#,
+        );
+        let result = ask_eleven(&endpoint, "xi-test");
+        handle.join().expect("mock thread");
+
+        match result {
+            Err(TranscribeError::Unavailable { status, message }) => {
+                assert_eq!(status, 503);
+                assert!(message.contains("upstream unavailable"));
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn elevenlabs_unreachable_provider_is_a_network_failure() {
+        let result = ask_eleven("http://127.0.0.1:1/v1/speech-to-text", "xi-test");
+        assert!(matches!(result, Err(TranscribeError::Network { .. })));
+    }
+
+    #[test]
+    fn elevenlabs_reply_that_is_not_json_is_malformed_not_empty_text() {
+        let (endpoint, _captured, handle) =
+            mock_at("/v1/speech-to-text", 200, "<html>gateway</html>");
+        let result = ask_eleven(&endpoint, "xi-test");
+        handle.join().expect("mock thread");
+
+        assert!(matches!(result, Err(TranscribeError::Malformed { .. })));
+    }
+
+    #[test]
+    fn elevenlabs_missing_key_is_refused_before_any_request() {
+        let uploaded = Arc::new(Mutex::new(None));
+        let wav = b"RIFFmock".to_vec();
+        let result = ElevenLabs::at("http://127.0.0.1:1/never").transcribe(&Request {
+            wav: &wav,
+            api_key: "   ",
+            language: None,
+            prompt: None,
+            uploaded: &uploaded,
+        });
+        assert!(matches!(result, Err(TranscribeError::MissingKey)));
     }
 }
