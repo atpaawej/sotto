@@ -30,6 +30,19 @@ npm run tauri build
 src-tauri/target/release/sotto
 ```
 
+## Install
+
+The app ships as a `.deb`, so installing it needs sudo. The package installs
+the `sotto` binary, the `.desktop` entry and the icon:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/atpaawej/typeless/main/scripts/install-sotto.sh | sudo bash
+```
+
+The script downloads the latest `.deb` from the GitHub release, verifies its
+SHA-256 against the checksum the release ships, and installs it with dpkg.
+It also works for an update — one command installs the newest release.
+
 ## First run
 
 The first launch opens a four-step setup: pick Groq or ElevenLabs, paste that
@@ -46,6 +59,11 @@ other provider, leaving both named results side by side.
 Sotto writes `~/.config/sotto/config.json` with mode 0600, because it holds API
 keys. A file that cannot be parsed is reported in the window and left exactly as
 it is — the app never resets your settings to recover from a bad byte.
+
+General names the active injector — clipboard write plus Ctrl+V, or ydotool —
+and why it was chosen; the injector is ordered by `text_injectors` in the
+config file, so ordering is data. About reports whether a newer release is
+available, and installing it is one click or one command as above.
 
 ## Desktop entry
 
@@ -65,6 +83,7 @@ Injection also needs `wl-clipboard` (`wl-copy`) on `PATH`.
 
 ```sh
 npm run build                     # typecheck and bundle the interface
+npm run tauri build               # builds the .deb (and the AppImage at tag)
 cd src-tauri && cargo test        # session rules, adapters, config storage
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 ```
