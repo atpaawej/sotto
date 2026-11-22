@@ -705,6 +705,23 @@ function HistorySection({
     };
   }, [query, reload]);
 
+  // A retry with the other provider starts on the session thread: its new row
+  // and its result land after the click handler has returned.
+  useEffect(() => {
+    const unlisten = listen<DictationState>(DICTATION_EVENT, (event) => {
+      if (event.payload.phase === "done" || event.payload.phase === "failed") {
+        setReload((count) => count + 1);
+      }
+    });
+    return () => {
+      void unlisten.then(
+        (stop) => stop(),
+        (error: unknown) =>
+          console.error("could not stop the history listener", error),
+      );
+    };
+  }, []);
+
   useEffect(
     () => () => {
       audio.current?.pause();
