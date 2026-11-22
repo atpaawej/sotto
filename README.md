@@ -16,7 +16,7 @@ The installer downloads the latest `.deb` from [GitHub Releases](https://github.
 
 Typing long messages, code comments, and prompts by hand slows you down, and most Linux dictation tools either break on Wayland or lock you into slow local models.
 
-With Sotto, you stay in whatever app is focused. Hold your shortcut key in a terminal, editor, or browser, talk naturally, and release. Sotto records your voice, transcribes it on Groq's Whisper `large-v3-turbo`, cleans up filler words, punctuation, and mid-sentence self-corrections, and injects the finished text straight at your cursor in ~400 ms.
+With Sotto, you stay in whatever app is focused. Hold your shortcut key in a terminal, editor, or browser, talk naturally, and release. Sotto records your voice, transcribes it on Groq's Whisper `large-v3-turbo`, cleans up filler words, punctuation, and mid-sentence self-corrections, and injects the finished text straight at your cursor in ~800 ms.
 
 ## What you get
 
