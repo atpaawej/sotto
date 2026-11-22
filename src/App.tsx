@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  asFailure,
   cancelDictation,
   copyHistory,
   deleteAllHistory,
   deleteHistory,
   DICTATION_EVENT,
   keyLabel,
+  otherProvider,
   providerLabel,
+  PROVIDERS,
   readAccess,
   readAppInfo,
   readConfig,
@@ -16,10 +19,14 @@ import {
   readRecording,
   retryDictation,
   retryHistory,
+  retryHistoryOther,
   retryKeyboardAccess,
+  testProvider,
   toggleDictation,
   updateCleanup,
   updateDictionary,
+  updateProvider,
+  updateProviderKey,
   updateRetention,
   type Access,
   type AppInfo,
@@ -28,8 +35,11 @@ import {
   type CleanupLevel,
   type ConfigSnapshot,
   type DictationState,
+  type Failure,
   type HistoryEntry,
+  type ProviderId,
 } from "./lib/api";
+import Wizard from "./Wizard";
 
 type Loaded =
   | { status: "loading" }
@@ -51,6 +61,11 @@ export default function App() {
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [active, setActive] = useState<SectionId>("general");
   const [access, setAccess] = useState<Access | null>(null);
+  // Decided on the first successful load: saving a key mid-wizard must not
+  // close it before the live test and the test dictation have both passed.
+  const [wizard, setWizard] = useState<ConfigSnapshot | null | undefined>(
+    undefined,
+  );
 
   const refreshAccess = useCallback(() => {
     readAccess().then(setAccess, () => {
@@ -87,6 +102,15 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (wizard !== undefined || loaded.status !== "ready") return;
+    const { providers } = loaded.snapshot.config;
+    const hasKey = [providers.groq_key, providers.elevenlabs_key].some((key) =>
+      Boolean(key?.trim()),
+    );
+    setWizard(hasKey ? null : loaded.snapshot);
+  }, [loaded, wizard]);
+
   const version = loaded.status === "ready" ? loaded.info.version : "—";
 
   return (
@@ -111,28 +135,43 @@ export default function App() {
       </nav>
 
       <main className="content">
-        {loaded.status === "failed" && (
-          <div className="notice" role="alert">
-            <p className="notice-title">Your settings could not be read.</p>
-            <p className="notice-detail">
-              The file was left untouched. Fix it by hand, then reopen Sotto.
-              <br />
-              <span className="mono">{loaded.message}</span>
-            </p>
-          </div>
-        )}
+        {wizard ? (
+          <Wizard
+            initial={wizard}
+            access={access}
+            onSnapshot={(snapshot) =>
+              setLoaded((prev) =>
+                prev.status === "ready" ? { ...prev, snapshot } : prev,
+              )
+            }
+            onDone={() => setWizard(null)}
+          />
+        ) : (
+          <>
+            {loaded.status === "failed" && (
+              <div className="notice" role="alert">
+                <p className="notice-title">Your settings could not be read.</p>
+                <p className="notice-detail">
+                  The file was left untouched. Fix it by hand, then reopen Sotto.
+                  <br />
+                  <span className="mono">{loaded.message}</span>
+                </p>
+              </div>
+            )}
 
-        <Section
-          id={active}
-          loaded={loaded}
-          access={access}
-          refreshAccess={refreshAccess}
-          onSnapshot={(snapshot) =>
-            setLoaded((prev) =>
-              prev.status === "ready" ? { ...prev, snapshot } : prev,
-            )
-          }
-        />
+            <Section
+              id={active}
+              loaded={loaded}
+              access={access}
+              refreshAccess={refreshAccess}
+              onSnapshot={(snapshot) =>
+                setLoaded((prev) =>
+                  prev.status === "ready" ? { ...prev, snapshot } : prev,
+                )
+              }
+            />
+          </>
+        )}
       </main>
     </div>
   );
@@ -202,6 +241,7 @@ function Section({
           snapshot={snapshot}
           access={access}
           refreshAccess={refreshAccess}
+          onSnapshot={onSnapshot}
         />
       );
 
@@ -748,6 +788,15 @@ function HistorySection({
     }
   }
 
+  async function retryOther(entry: HistoryEntry) {
+    try {
+      await retryHistoryOther(entry.id);
+      setReload((count) => count + 1);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function changeRetention(value: string) {
     setSavingRetention(true);
     try {
@@ -773,7 +822,8 @@ function HistorySection({
       <p className="section-deck">
         Every dictation, with its transcript and its audio, kept on this machine
         and nowhere else. A failed dictation keeps its recording so Retry can
-        send it again without asking you to speak.
+        send it again without asking you to speak. Retrying with the other
+        provider keeps both results, each named with the provider that heard it.
       </p>
 
       {error && (
@@ -842,11 +892,7 @@ function HistorySection({
                   </time>
                   <span className="history-facts">
                     {formatElapsed(entry.durationMs)} ·{" "}
-                    {entry.provider === "groq"
-                      ? "Groq"
-                      : entry.provider === "eleven_labs"
-                        ? "ElevenLabs"
-                        : entry.provider}{" "}
+                    {providerLabel(entry.provider)}{" "}
                     <span className="mono">{entry.model}</span>
                   </span>
                 </div>
@@ -894,6 +940,16 @@ function HistorySection({
                       Retry
                     </button>
                   )}
+                  {(entry.provider === "groq" || entry.provider === "eleven_labs") &&
+                    entry.recordingPath && (
+                    <button
+                      type="button"
+                      className="button button-quiet"
+                      onClick={() => void retryOther(entry)}
+                    >
+                      Retry with {providerLabel(otherProvider(entry.provider))}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="button button-quiet history-remove"
@@ -923,23 +979,37 @@ function formatWhen(milliseconds: number): string {
   }).format(date);
 }
 
+type KeyTest = { status: "testing" | "ok" | "failed"; failure?: Failure };
+
 function SpeechSection({
   snapshot,
   access,
   refreshAccess,
+  onSnapshot,
 }: {
   snapshot?: ConfigSnapshot;
   access: Access | null;
   refreshAccess: () => void;
+  onSnapshot: (snapshot: ConfigSnapshot) => void;
 }) {
   const [dictation, setDictation] = useState<DictationState | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [busy, setBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryingDictation, setRetryingDictation] = useState(false);
+  const [keyDrafts, setKeyDrafts] = useState<Partial<Record<ProviderId, string>>>({});
+  const [keyTests, setKeyTests] = useState<Partial<Record<ProviderId, KeyTest>>>({});
+  const [savingKey, setSavingKey] = useState<ProviderId | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const [providerError, setProviderError] = useState<string | null>(null);
   const since = useRef<number | null>(null);
 
-  const hasKey = Boolean(snapshot?.config.providers.groq_key);
+  const activeProvider = snapshot?.config.active_provider ?? "groq";
+  const activeKey =
+    activeProvider === "groq"
+      ? snapshot?.config.providers.groq_key
+      : snapshot?.config.providers.elevenlabs_key;
+  const hasKey = Boolean(activeKey?.trim());
   const phase = dictation?.phase ?? "idle";
   const recording = phase === "listening";
   const working = phase === "working";
@@ -1061,6 +1131,47 @@ function SpeechSection({
     }
   }
 
+  async function chooseProvider(next: ProviderId) {
+    setSwitching(true);
+    setProviderError(null);
+    try {
+      onSnapshot(await updateProvider(next));
+    } catch (error) {
+      setProviderError(asFailure(error).detail);
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  async function saveKey(provider: ProviderId) {
+    const draft = keyDrafts[provider]?.trim();
+    if (!draft) return;
+    setSavingKey(provider);
+    setProviderError(null);
+    try {
+      onSnapshot(await updateProviderKey(provider, draft));
+      setKeyDrafts((prev) => ({ ...prev, [provider]: "" }));
+      setKeyTests((prev) => ({ ...prev, [provider]: undefined }));
+    } catch (error) {
+      setProviderError(asFailure(error).detail);
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
+  async function testKey(provider: ProviderId) {
+    setKeyTests((prev) => ({ ...prev, [provider]: { status: "testing" } }));
+    try {
+      await testProvider(provider);
+      setKeyTests((prev) => ({ ...prev, [provider]: { status: "ok" } }));
+    } catch (error) {
+      setKeyTests((prev) => ({
+        ...prev,
+        [provider]: { status: "failed", failure: asFailure(error) },
+      }));
+    }
+  }
+
   const label = recording
     ? "Stop and insert"
     : working
@@ -1074,8 +1185,8 @@ function SpeechSection({
       <h1 className="section-title">Speech</h1>
       <p className="section-deck">
         {trigger
-          ? `Hold ${trigger} and speak; release and the words land where your cursor is. The audio goes to Groq with your key and nowhere else.`
-          : "Hold the shortcut and speak; the words land where your cursor is. The audio goes to Groq with your key and nowhere else."}
+          ? `Hold ${trigger} and speak; release and the words land where your cursor is. The audio goes to ${providerLabel(activeProvider)} with your key and nowhere else.`
+          : `Hold the shortcut and speak; the words land where your cursor is. The audio goes to ${providerLabel(activeProvider)} with your key and nowhere else.`}
       </p>
 
       {access?.hotkey.problem && (
@@ -1097,6 +1208,100 @@ function SpeechSection({
           >
             {retrying ? "Asking…" : "Ask again"}
           </button>
+        </div>
+      )}
+
+      <dl className="rows speech-rows">
+        <div className="row">
+          <dt className="row-label">Provider</dt>
+          <dd className="row-value">
+            <div className="segmented" role="group" aria-label="Active provider">
+              {PROVIDERS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className="segmented-button"
+                  aria-pressed={activeProvider === option.id}
+                  disabled={switching || !snapshot}
+                  onClick={() => void chooseProvider(option.id)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="row-hint">
+              Only the active provider receives your audio. Both keys stay configured.
+            </p>
+          </dd>
+        </div>
+
+        {PROVIDERS.map((option) => {
+          const saved =
+            option.id === "groq"
+              ? snapshot?.config.providers.groq_key
+              : snapshot?.config.providers.elevenlabs_key;
+          const result = keyTests[option.id];
+          return (
+            <div className="row" key={option.id}>
+              <dt className="row-label">{option.label} key</dt>
+              <dd className="row-value">
+                <div className="key-row">
+                  <input
+                    type="password"
+                    className="text-input"
+                    aria-label={`${option.label} API key`}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={
+                      saved ? "Paste a new key to replace it" : `Paste your ${option.label} key`
+                    }
+                    value={keyDrafts[option.id] ?? ""}
+                    disabled={!snapshot || savingKey === option.id}
+                    onChange={(event) =>
+                      setKeyDrafts((prev) => ({
+                        ...prev,
+                        [option.id]: event.target.value,
+                      }))
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    disabled={!keyDrafts[option.id]?.trim() || savingKey === option.id}
+                    onClick={() => void saveKey(option.id)}
+                  >
+                    {savingKey === option.id ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    disabled={!saved || result?.status === "testing"}
+                    onClick={() => void testKey(option.id)}
+                  >
+                    {result?.status === "testing" ? "Testing…" : "Test"}
+                  </button>
+                </div>
+                <p className="row-hint">
+                  {saved ? "A key is saved. Paste a new one to replace it." : "No key saved yet."}
+                </p>
+                {result?.status === "ok" && (
+                  <p className="key-test-ok">{option.label} accepted the key.</p>
+                )}
+                {result?.status === "failed" && result.failure && (
+                  <p className="key-test-failed">
+                    <span className="key-test-reason">{result.failure.reason}</span>{" "}
+                    <span className="key-test-detail">{result.failure.detail}</span>
+                  </p>
+                )}
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
+
+      {providerError && (
+        <div className="notice" role="alert">
+          <p className="notice-detail">{providerError}</p>
         </div>
       )}
 
@@ -1131,8 +1336,8 @@ function SpeechSection({
       <p className="dictation-hint" aria-live="polite">
         {!hasKey ? (
           <>
-            Add a Groq key to <span className="mono">{snapshot?.path}</span> to
-            dictate. Keys never leave this machine except to the provider.
+            Add a {providerLabel(activeProvider)} key above to dictate. Keys
+            never leave this machine except to the provider.
           </>
         ) : recording ? (
           dictation?.tapMode || dictation?.locked
@@ -1198,7 +1403,7 @@ function Result({ attempt }: { attempt: Attempt }) {
         </p>
       )}
       <p className="result-meta">
-        {attempt.provider === "groq" ? "Groq" : attempt.provider}{" "}
+        {providerLabel(attempt.provider)}{" "}
         <span className="mono">{attempt.model}</span>
         {attempt.cleanupModel && (
           <>

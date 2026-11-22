@@ -51,6 +51,27 @@ export function updateDictionary(dictionary: string[]): Promise<ConfigSnapshot> 
   return invoke<ConfigSnapshot>("update_dictionary", { dictionary });
 }
 
+/** Switching provider never clears the other one's key. */
+export function updateProvider(provider: ProviderId): Promise<ConfigSnapshot> {
+  return invoke<ConfigSnapshot>("update_provider", { provider });
+}
+
+export function updateProviderKey(
+  provider: ProviderId,
+  key: string,
+): Promise<ConfigSnapshot> {
+  return invoke<ConfigSnapshot>("update_provider_key", { provider, key });
+}
+
+export function updateTriggerKey(key: string): Promise<ConfigSnapshot> {
+  return invoke<ConfigSnapshot>("update_trigger_key", { key });
+}
+
+/** Rejects with the one Failure vocabulary after a real provider request. */
+export function testProvider(provider: ProviderId): Promise<void> {
+  return invoke<void>("test_provider", { provider });
+}
+
 export function readAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("app_info");
 }
@@ -175,6 +196,11 @@ export function retryHistory(id: string): Promise<void> {
   return invoke<void>("history_retry", { id });
 }
 
+/** Re-transcribes with the other provider and keeps the first result. */
+export function retryHistoryOther(id: string): Promise<void> {
+  return invoke<void>("history_retry_other", { id });
+}
+
 export function copyHistory(id: string): Promise<void> {
   return invoke<void>("history_copy", { id });
 }
@@ -227,6 +253,58 @@ export function keyLabel(key: string): string {
   return KEY_NAMES[key] ?? key;
 }
 
-export function providerLabel(provider: ProviderId): string {
-  return provider === "groq" ? "Groq" : "ElevenLabs";
+export function providerLabel(provider: string): string {
+  if (provider === "groq") return "Groq";
+  if (provider === "eleven_labs") return "ElevenLabs";
+  return provider;
 }
+
+export function otherProvider(provider: string): ProviderId {
+  return provider === "eleven_labs" ? "groq" : "eleven_labs";
+}
+
+/** A rejected command carries a serialized Failure, not a plain string. */
+export function asFailure(error: unknown): Failure {
+  if (
+    error &&
+    typeof error === "object" &&
+    "kind" in error &&
+    "reason" in error &&
+    "detail" in error
+  ) {
+    return error as Failure;
+  }
+  return {
+    kind: "provider_error",
+    reason: "That did not go through.",
+    detail: String(error),
+    cause: null,
+  };
+}
+
+export const PROVIDERS: { id: ProviderId; label: string }[] = [
+  { id: "groq", label: "Groq" },
+  { id: "eleven_labs", label: "ElevenLabs" },
+];
+
+/** Every trigger key the listener accepts, in the order shown in Settings. */
+export const TRIGGER_KEYS: { id: string; label: string }[] = [
+  { id: "ControlRight", label: "Right Ctrl" },
+  { id: "ControlLeft", label: "Left Ctrl" },
+  { id: "AltRight", label: "Right Alt" },
+  { id: "AltLeft", label: "Left Alt" },
+  { id: "ShiftRight", label: "Right Shift" },
+  { id: "ShiftLeft", label: "Left Shift" },
+  { id: "SuperRight", label: "Right Super" },
+  { id: "SuperLeft", label: "Left Super" },
+  { id: "CapsLock", label: "Caps Lock" },
+  { id: "Space", label: "Space" },
+  { id: "F5", label: "F5" },
+  { id: "F6", label: "F6" },
+  { id: "F7", label: "F7" },
+  { id: "F8", label: "F8" },
+  { id: "F9", label: "F9" },
+  { id: "F10", label: "F10" },
+  { id: "F11", label: "F11" },
+  { id: "F12", label: "F12" },
+];
