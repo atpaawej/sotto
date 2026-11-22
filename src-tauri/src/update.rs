@@ -157,12 +157,21 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
 }
 
 fn run_sudo_install(path: &Path) -> Result<(), String> {
-    let status = process::Command::new("sudo")
+    let status = match process::Command::new("pkexec")
         .arg("dpkg")
         .arg("-i")
         .arg(path)
         .status()
-        .map_err(|error| format!("could not run dpkg: {error}"))?;
+    {
+        Ok(status) => status,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => process::Command::new("sudo")
+            .arg("dpkg")
+            .arg("-i")
+            .arg(path)
+            .status()
+            .map_err(|sudo_error| format!("could not run dpkg: {sudo_error}"))?,
+        Err(error) => return Err(format!("could not run pkexec: {error}")),
+    };
     if status.success() {
         Ok(())
     } else {

@@ -1,6 +1,6 @@
 [package]
 name = "sotto"
-version = "0.2.0"
+version = "0.2.1"
 description = "Hold a key, speak, and clean text lands where your cursor is."
 edition = "2021"
 rust-version = "1.82"

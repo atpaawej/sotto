@@ -420,16 +420,20 @@ fn set_start_at_login(enabled: bool) -> Result<(), String> {
 /// Asks GitHub for the newest release and reports whether it is newer than
 /// the running version.
 #[tauri::command]
-fn check_for_updates() -> Result<update::UpdateStatus, String> {
-    update::check(env!("CARGO_PKG_VERSION"))
+async fn check_for_updates() -> Result<update::UpdateStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| update::check(env!("CARGO_PKG_VERSION")))
+        .await
+        .map_err(|error| format!("update check task failed: {error}"))?
 }
 
 /// Downloads the newest `.deb`, verifies its checksum and installs it with
-/// sudo. The running app keeps going; the user restarts it to use the new
-/// version.
+/// pkexec (or sudo fallback). The running app keeps going; the user restarts it
+/// to use the new version.
 #[tauri::command]
-fn install_update() -> Result<(), String> {
-    update::install_latest()
+async fn install_update() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(update::install_latest)
+        .await
+        .map_err(|error| format!("update install task failed: {error}"))?
 }
 
 #[tauri::command]
