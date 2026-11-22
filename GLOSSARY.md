@@ -31,3 +31,15 @@ _Avoid_: paste, typing (both are ways to inject, not the act itself)
 **Pill**:
 The small always-on-top window that shows listening, working, and done.
 _Avoid_: overlay, HUD, widget
+
+**History**:
+Every Dictation, newest first, with its Transcript, cleaned text, outcome, and Recording.
+_Avoid_: log, archive, feed
+
+**Failure**:
+A typed reason a Dictation could not finish, with one short sentence for the Pill and the full detail for Settings.
+_Avoid_: error message, exception, problem string
+
+**Retry**:
+Sending a stored Recording to the provider again, without asking the user to speak.
+_Avoid_: redo, try again (the UI label may say Retry, the act is retry)
