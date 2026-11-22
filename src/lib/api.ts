@@ -67,13 +67,35 @@ export interface Timings {
 export interface Attempt {
   transcript: string;
   cleaned: string;
-  cleanupError: string | null;
+  cleanupFailure: Failure | null;
   cleanupModel: string | null;
   provider: string;
   model: string;
   durationMs: number;
   timings: Timings;
 }
+
+/** The one failure vocabulary, as the Rust side serializes it. */
+export interface Failure {
+  kind: FailureKind;
+  /** The short sentence the Pill shows, derived once in Rust. */
+  reason: string;
+  /** The full sentence Settings shows. */
+  detail: string;
+  /** The cause chain for the log, when it differs from the detail. */
+  cause: string | null;
+}
+
+export type FailureKind =
+  | "key_rejected"
+  | "rate_limited"
+  | "provider_error"
+  | "network"
+  | "timeout"
+  | "mic_denied"
+  | "shortcut_refused"
+  | "injection_blocked"
+  | "storage_failed";
 
 export type Phase =
   | "idle"
@@ -92,6 +114,26 @@ export interface DictationState {
   tapMode: boolean;
   message: string | null;
   attempt: Attempt | null;
+  failure: Failure | null;
+  /** The Recording Retry would send again, when there is one on disk. */
+  retryId: string | null;
+}
+
+export type InjectionOutcome = "not_attempted" | "inserted" | "blocked";
+
+/** One Dictation as History shows it. */
+export interface HistoryEntry {
+  id: string;
+  createdAtMs: number;
+  finishedAtMs: number | null;
+  durationMs: number;
+  provider: string;
+  model: string;
+  transcript: string;
+  cleaned: string;
+  injection: InjectionOutcome;
+  failure: Failure | null;
+  recordingPath: string;
 }
 
 export interface Access {
@@ -117,6 +159,42 @@ export function toggleDictation(): Promise<void> {
 /** Drops the dictation in progress and injects nothing. */
 export function cancelDictation(): Promise<void> {
   return invoke<void>("dictation_cancel");
+}
+
+/** Re-transcribes the last failed Recording. The user does not speak again. */
+export function retryDictation(): Promise<void> {
+  return invoke<void>("dictation_retry");
+}
+
+/** Newest first. An empty query lists everything. */
+export function readHistory(query = ""): Promise<HistoryEntry[]> {
+  return invoke<HistoryEntry[]>("history_list", { query });
+}
+
+export function retryHistory(id: string): Promise<void> {
+  return invoke<void>("history_retry", { id });
+}
+
+export function copyHistory(id: string): Promise<void> {
+  return invoke<void>("history_copy", { id });
+}
+
+/** The WAV bytes for one entry, for the Play button. */
+export function readRecording(id: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("history_recording", { id });
+}
+
+export function deleteHistory(id: string): Promise<void> {
+  return invoke<void>("history_delete", { id });
+}
+
+export function deleteAllHistory(): Promise<void> {
+  return invoke<void>("history_delete_all");
+}
+
+/** Saves the limit and deletes anything already older than it. */
+export function updateRetention(days: number | null): Promise<ConfigSnapshot> {
+  return invoke<ConfigSnapshot>("update_retention", { days });
 }
 
 export function readDictationState(): Promise<DictationState> {

@@ -732,6 +732,138 @@ body.pill-body {
   margin-top: 12px;
 }
 
+/* History: a ledger of what was said, not a feed of cards. */
+
+.section-wide {
+  max-width: 760px;
+}
+
+.history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.history-search {
+  flex: 1 1 240px;
+}
+
+.history-retention {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+}
+
+.history-retention-label {
+  font-size: 0.75rem;
+}
+
+.history-select {
+  flex: none;
+  width: auto;
+  padding-right: 26px;
+}
+
+.history-delete-all {
+  margin-top: 0;
+}
+
+.history-status {
+  margin-top: 20px;
+}
+
+.history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-item {
+  padding: 18px 0 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.history-when {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-facts {
+  color: var(--faint);
+  font-size: 0.72rem;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.history-text {
+  margin: 8px 0 0;
+  max-width: 64ch;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 1.0625rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.history-text-empty {
+  color: var(--faint);
+  font-family: inherit;
+  font-size: 0.8125rem;
+}
+
+.history-failure {
+  margin: 8px 0 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.history-failure-reason {
+  color: var(--live);
+  font-weight: 500;
+}
+
+.history-failure-detail {
+  color: var(--faint);
+}
+
+.history-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.history-actions .button-quiet {
+  margin-top: 0;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+}
+
+.history-remove {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.history-remove:hover:not(:disabled) {
+  border-color: var(--live);
+  color: var(--live);
+}
+
 /* Cleanup & Dictionary controls */
 
 .segmented {

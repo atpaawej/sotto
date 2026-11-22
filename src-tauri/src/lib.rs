@@ -8,6 +8,8 @@ mod audio;
 mod cleanup;
 mod config;
 mod dictation;
+mod failure;
+mod history;
 mod hotkey;
 mod inject;
 mod keyboard;
@@ -24,9 +26,11 @@ use std::{
 
 use config::{describe, normalize_dictionary, Cleanup, Config, ConfigStore};
 use dictation::{Captured, Dictation};
+use failure::Failure;
+use history::{Entry, History};
 use portal::SharedAccess;
 use serde::Serialize;
-use session::{CapturePort, Effect, Input, Ports, Session};
+use session::{CapturePort, Effect, Input, Ports, Session, View};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -44,6 +48,11 @@ struct AppState {
     inbox: mpsc::Sender<Input>,
     view: session::SharedView,
     access: SharedAccess,
+    /// Every Dictation and its Recording. The same instance the session
+    /// writes to, so History and Retry see one truth.
+    history: Arc<History>,
+    /// History's Copy button, which shares the injector's clipboard.
+    copy: inject::CopyHandle,
     /// Asking again for `/dev/input` and `/dev/uinput` access after setup.
     retry_inject: tokio::sync::mpsc::UnboundedSender<()>,
     retry_hotkey: tokio::sync::mpsc::UnboundedSender<()>,
@@ -72,21 +81,21 @@ struct Microphone {
 }
 
 impl CapturePort for Microphone {
-    fn start(&mut self) -> Result<(), String> {
-        let config = current_config(&self.loaded)?;
+    fn start(&mut self) -> Result<(), Failure> {
+        let config = current_config(&self.loaded).map_err(failure::settings)?;
         let app = self.app.clone();
         let on_level = Arc::new(move |level: f32| {
             let _ = app.emit("dictation://level", level);
         });
         self.dictation
             .start_with_levels(&config, Some(on_level))
-            .map_err(|error| describe(&error))
+            .map_err(failure::from_dictation)
     }
 
-    fn stop(&mut self) -> Result<Captured, String> {
+    fn stop(&mut self) -> Result<Captured, Failure> {
         self.dictation
             .stop_recording()
-            .map_err(|error| describe(&error))
+            .map_err(failure::from_dictation)
     }
 }
 
@@ -118,7 +127,10 @@ fn mutate_config(
         .map_err(|_| "the config state was left locked by a panicking thread".to_owned())?;
     let mut config = loaded.clone()?;
     update(&mut config);
-    state.store.save(&config).map_err(|error| describe(&error))?;
+    state
+        .store
+        .save(&config)
+        .map_err(|error| describe(&error))?;
     *loaded = Ok(config.clone());
     snapshot_for(&state.store, config)
 }
@@ -130,10 +142,7 @@ fn config_snapshot(state: State<'_, AppState>) -> Result<ConfigSnapshot, String>
 }
 
 #[tauri::command]
-fn update_cleanup(
-    state: State<'_, AppState>,
-    cleanup: Cleanup,
-) -> Result<ConfigSnapshot, String> {
+fn update_cleanup(state: State<'_, AppState>, cleanup: Cleanup) -> Result<ConfigSnapshot, String> {
     mutate_config(&state, |config| {
         config.cleanup = cleanup;
     })
@@ -159,18 +168,93 @@ fn dictation_cancel(state: State<'_, AppState>) -> Result<(), String> {
     send(&state, Input::Cancel)
 }
 
+/// Retries the last failed Dictation from its stored Recording. The user does
+/// not speak again.
+#[tauri::command]
+fn dictation_retry(state: State<'_, AppState>) -> Result<(), String> {
+    send(&state, Input::Retry { id: None })
+}
+
+#[tauri::command]
+fn history_list(state: State<'_, AppState>, query: String) -> Result<Vec<Entry>, String> {
+    state.history.list(&query).map_err(fail)
+}
+
+#[tauri::command]
+fn history_retry(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    send(&state, Input::Retry { id: Some(id) })
+}
+
+#[tauri::command]
+fn history_copy(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let entry = state.history.entry(&id).map_err(fail)?;
+    let text = if entry.cleaned.trim().is_empty() {
+        entry.transcript
+    } else {
+        entry.cleaned
+    };
+    if text.trim().is_empty() {
+        return Err("that dictation has no text to copy".to_owned());
+    }
+    state.copy.copy(&text).map_err(|reason| {
+        let failure = failure::injection(reason);
+        fail(failure)
+    })
+}
+
+/// The WAV for one entry, so History can play it without exposing the disk.
+#[tauri::command]
+fn history_recording(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let wav = state.history.recording(&id).map_err(fail)?;
+    Ok(tauri::ipc::Response::new(wav))
+}
+
+#[tauri::command]
+fn history_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.history.delete(&id).map_err(fail)
+}
+
+#[tauri::command]
+fn history_delete_all(state: State<'_, AppState>) -> Result<(), String> {
+    state.history.delete_all().map_err(fail)
+}
+
+/// Saves the retention limit and applies it at once, so choosing a limit is
+/// not a promise about some future launch.
+#[tauri::command]
+fn update_retention(
+    state: State<'_, AppState>,
+    days: Option<u32>,
+) -> Result<ConfigSnapshot, String> {
+    let snapshot = mutate_config(&state, |config| {
+        config.retention_days = days;
+    })?;
+    state.history.enforce_retention(days).map_err(fail)?;
+    Ok(snapshot)
+}
+
+fn fail(failure: Failure) -> String {
+    failure.log();
+    failure.detail
+}
+
 #[tauri::command]
 fn dictation_state(state: State<'_, AppState>) -> session::View {
     state
         .view
         .lock()
         .map(|view| view.clone())
-        .unwrap_or_else(|_| session::View {
+        .unwrap_or_else(|_| View {
             phase: session::Phase::Idle,
             locked: false,
             tap_mode: false,
             message: Some("the dictation state was left locked by a panicking thread".to_owned()),
             attempt: None,
+            failure: None,
+            retry_id: None,
         })
 }
 
@@ -250,7 +334,15 @@ pub fn run() {
             app_info,
             dictation_toggle,
             dictation_cancel,
+            dictation_retry,
             dictation_state,
+            history_list,
+            history_retry,
+            history_copy,
+            history_recording,
+            history_delete,
+            history_delete_all,
+            update_retention,
             access_status,
             retry_keyboard_access,
             open_main_window,
@@ -275,10 +367,19 @@ pub fn run() {
             pill::create(app.handle()).map_err(std::io::Error::other)?;
 
             let loaded_state = Arc::new(Mutex::new(loaded));
-            let bridge = inject::bridge(Arc::clone(&access));
-            let retry_inject = bridge.retry.clone();
-            let view = session::shared_view();
+            let history = Arc::new(History::open_default());
+            if let Err(failure) = history.enforce_retention(config.retention_days) {
+                // Retention runs before there is a window to show it in. The
+                // cause chain goes to the log; History still lists, so the
+                // user can delete by hand.
+                failure.log();
+            }
+
             let (inbox, inbox_rx) = mpsc::channel::<Input>();
+            let bridge = inject::bridge(Arc::clone(&access), inbox.clone());
+            let retry_inject = bridge.retry.clone();
+            let copy = bridge.copy.clone();
+            let view = session::shared_view();
 
             start_session(
                 app.handle().clone(),
@@ -286,6 +387,7 @@ pub fn run() {
                 inbox.clone(),
                 view.clone(),
                 Arc::clone(&loaded_state),
+                Arc::clone(&history),
                 bridge,
             );
 
@@ -303,6 +405,8 @@ pub fn run() {
                 inbox,
                 view,
                 access,
+                history,
+                copy,
                 retry_inject,
                 retry_hotkey,
             });
@@ -311,10 +415,9 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
 
-            let icon = app
-                .default_window_icon()
-                .cloned()
-                .ok_or_else(|| std::io::Error::other("the app has no window icon to reuse for the tray"))?;
+            let icon = app.default_window_icon().cloned().ok_or_else(|| {
+                std::io::Error::other("the app has no window icon to reuse for the tray")
+            })?;
 
             TrayIconBuilder::with_id("sotto")
                 .icon(icon)
@@ -360,6 +463,7 @@ fn start_session(
     effects: mpsc::Sender<Input>,
     view: session::SharedView,
     loaded: Arc<Mutex<Result<Config, String>>>,
+    history: Arc<History>,
     bridge: inject::Bridge,
 ) {
     let session_view = Arc::clone(&view);
@@ -380,6 +484,7 @@ fn start_session(
             }),
             injector: Box::new(bridge.injector),
             surface: Box::new(pill::PillSurface::new(app.clone())),
+            history: Box::new(history),
         };
         let mut session = Session::new(ports);
         let _ = app.emit("dictation://state", session.view());
@@ -393,21 +498,34 @@ fn start_session(
             let _ = app.emit("dictation://state", &current);
 
             for effect in work {
-                if let Effect::Transcribe { captured } = effect {
-                    let loaded = Arc::clone(&loaded);
-                    let cleaner = Arc::clone(&shared_cleaner);
-                    let reply = effects.clone();
-                    thread::spawn(move || {
-                        let result = current_config(&loaded).and_then(|config| {
-                            Dictation::transcribe_with_cleaner(
-                                &config,
-                                &captured,
-                                cleaner.as_ref().as_ref().map(|c| c as &dyn cleanup::Cleaner),
-                            )
-                            .map_err(|error| describe(&error))
+                match effect {
+                    Effect::Transcribe { id, captured } => {
+                        let loaded = Arc::clone(&loaded);
+                        let cleaner = Arc::clone(&shared_cleaner);
+                        let reply = effects.clone();
+                        thread::spawn(move || {
+                            let result = match current_config(&loaded) {
+                                Ok(config) => Dictation::transcribe_with_cleaner(
+                                    &config,
+                                    &captured,
+                                    cleaner
+                                        .as_ref()
+                                        .as_ref()
+                                        .map(|c| c as &dyn cleanup::Cleaner),
+                                )
+                                .map_err(failure::from_dictation),
+                                Err(problem) => Err(failure::settings(problem)),
+                            };
+                            if let Err(error) = reply.send(Input::Transcript { id, result }) {
+                                eprintln!(
+                                    "session: the dictation thread stopped before the reply: {error}"
+                                );
+                            }
                         });
-                        let _ = reply.send(Input::Transcript { result });
-                    });
+                    }
+                    // The failure has already been logged and shown by the
+                    // state machine; there is no work to hand off.
+                    Effect::Failed => {}
                 }
             }
         }

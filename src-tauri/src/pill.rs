@@ -15,7 +15,7 @@ use std::{
 
 use tauri::{AppHandle, Emitter, PhysicalPosition, WebviewWindow};
 
-use crate::session::{Phase, SurfacePort, View};
+use crate::session::{SurfacePort, View};
 
 const PILL_WIDTH: i32 = 380;
 const PILL_HEIGHT: f64 = 128.0;
@@ -96,13 +96,7 @@ impl SurfacePort for PillSurface {
                 if generation_guard.load(Ordering::SeqCst) != generation {
                     return;
                 }
-                let idle = View {
-                    phase: Phase::Idle,
-                    locked: false,
-                    tap_mode: false,
-                    message: None,
-                    attempt: None,
-                };
+                let idle = View::idle(false);
                 let _ = app.emit("dictation://state", &idle);
             });
         }
@@ -136,7 +130,7 @@ fn place(window: &WebviewWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::session::Phase;
 
     #[test]
     fn idle_is_the_only_phase_that_hides_the_pill() {

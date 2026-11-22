@@ -2,19 +2,13 @@
 //! via `evdev`, decoded into presses, releases, and Escape cancels for
 //! [`crate::session`].
 
-use std::{
-    fs,
-    io::ErrorKind,
-    path::PathBuf,
-    sync::mpsc::Sender,
-    thread,
-    time::Instant,
-};
+use std::{fs, io::ErrorKind, path::PathBuf, sync::mpsc::Sender, thread, time::Instant};
 
 use evdev::{Device, EventSummary, EventType, KeyCode};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
+    failure::{self, FailureKind},
     keyboard,
     portal::{self, SharedAccess},
     session::Input,
@@ -69,8 +63,16 @@ pub async fn serve(
                 eprintln!("hotkey: {problem}");
                 portal::update(&access, |state| {
                     state.hotkey.bound = false;
-                    state.hotkey.problem = Some(problem);
+                    state.hotkey.problem = Some(problem.clone());
                 });
+                if inbox
+                    .send(Input::CapabilityFailed {
+                        failure: failure::shortcut(problem),
+                    })
+                    .is_err()
+                {
+                    eprintln!("hotkey: the session stopped accepting failures");
+                }
                 if retries.recv().await.is_none() {
                     return;
                 }
@@ -98,6 +100,14 @@ fn bind_keyboards(
         state.hotkey.trigger = Some(configured_key.to_owned());
         state.hotkey.problem = None;
     });
+    if inbox
+        .send(Input::CapabilityRestored {
+            kind: FailureKind::ShortcutRefused,
+        })
+        .is_err()
+    {
+        eprintln!("hotkey: the session stopped accepting capability changes");
+    }
     Ok(())
 }
 
@@ -120,9 +130,9 @@ fn find_keyboards(trigger: KeyCode) -> Result<Vec<(PathBuf, Device)>, String> {
         match Device::open(&path) {
             Ok(device) => {
                 let is_keyboard = device.supported_events().contains(EventType::KEY)
-                    && device
-                        .supported_keys()
-                        .is_some_and(|keys| keys.contains(trigger) || keys.contains(KeyCode::KEY_ESC));
+                    && device.supported_keys().is_some_and(|keys| {
+                        keys.contains(trigger) || keys.contains(KeyCode::KEY_ESC)
+                    });
                 if is_keyboard {
                     matched.push((path, device));
                 }
@@ -171,10 +181,11 @@ fn read_loop(path: PathBuf, mut device: Device, trigger: KeyCode, inbox: Sender<
                             return;
                         }
                     }
-                } else if code == KeyCode::KEY_ESC && value == 1 {
-                    if inbox.send(Input::Cancel).is_err() {
-                        return;
-                    }
+                } else if code == KeyCode::KEY_ESC
+                    && value == 1
+                    && inbox.send(Input::Cancel).is_err()
+                {
+                    return;
                 }
             }
         }

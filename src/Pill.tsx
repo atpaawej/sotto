@@ -8,6 +8,7 @@ import {
   openMainWindow,
   readAccess,
   readDictationState,
+  retryDictation,
   toggleDictation,
   type DictationState,
 } from "./lib/api";
@@ -95,6 +96,10 @@ export default function Pill() {
   const rawPhase = dictation?.phase ?? "idle";
   const isError = (rawPhase === "failed" || rawPhase === "hint") && !dismissed;
   const phase = dismissed && (rawPhase === "failed" || rawPhase === "hint") ? "idle" : rawPhase;
+  const failure = dictation?.failure ?? null;
+  const retryId = dictation?.retryId ?? null;
+  /** The short reason comes from Rust; the pill never invents one. */
+  const shortReason = failure?.reason ?? dictation?.message ?? "Something went wrong.";
 
   const isIdle = phase === "idle";
   const isListening = phase === "listening";
@@ -248,20 +253,33 @@ export default function Pill() {
                   ✕
                 </button>
               </div>
-              <p className="pill-error-message">
-                {dictation?.message ?? "Something went wrong."}
-              </p>
+              <p className="pill-error-message">{shortReason}</p>
               <div className="pill-error-actions">
-                <button
-                  className="pill-action"
-                  type="button"
-                  onClick={() => {
-                    setDismissed(true);
-                    void toggleDictation();
-                  }}
-                >
-                  Try again
-                </button>
+                {retryId ? (
+                  <button
+                    className="pill-action"
+                    type="button"
+                    onClick={() => {
+                      setDismissed(true);
+                      void retryDictation();
+                    }}
+                  >
+                    Retry
+                  </button>
+                ) : (
+                  failure === null && (
+                    <button
+                      className="pill-action"
+                      type="button"
+                      onClick={() => {
+                        setDismissed(true);
+                        void toggleDictation();
+                      }}
+                    >
+                      Try again
+                    </button>
+                  )
+                )}
                 <button
                   className="pill-action pill-action-secondary"
                   type="button"

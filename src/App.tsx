@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { listen } from "@tauri-apps/api/event";
 import {
   cancelDictation,
+  copyHistory,
+  deleteAllHistory,
+  deleteHistory,
   DICTATION_EVENT,
   keyLabel,
   providerLabel,
@@ -9,10 +12,15 @@ import {
   readAppInfo,
   readConfig,
   readDictationState,
+  readHistory,
+  readRecording,
+  retryDictation,
+  retryHistory,
   retryKeyboardAccess,
   toggleDictation,
   updateCleanup,
   updateDictionary,
+  updateRetention,
   type Access,
   type AppInfo,
   type Attempt,
@@ -20,6 +28,7 @@ import {
   type CleanupLevel,
   type ConfigSnapshot,
   type DictationState,
+  type HistoryEntry,
 } from "./lib/api";
 
 type Loaded =
@@ -207,21 +216,7 @@ function Section({
       );
 
     case "history":
-      return (
-        <section className="section">
-          <h1 className="section-title">History</h1>
-          <p className="section-deck">
-            Every dictation, with its transcript and its audio, kept on this
-            machine and nowhere else.
-          </p>
-          <div className="empty">
-            <p className="empty-line">Nothing dictated yet.</p>
-            <p className="empty-note">
-              Your first dictation will appear here, with the audio to replay.
-            </p>
-          </div>
-        </section>
-      );
+      return <HistorySection snapshot={snapshot} onSnapshot={onSnapshot} />;
 
     case "about":
       return (
@@ -602,6 +597,332 @@ function DictionarySection({
   );
 }
 
+const RETENTION_CHOICES: { value: string; label: string }[] = [
+  { value: "", label: "Keep everything" },
+  { value: "7", label: "7 days" },
+  { value: "30", label: "30 days" },
+  { value: "90", label: "90 days" },
+  { value: "365", label: "1 year" },
+];
+
+function HistorySection({
+  snapshot,
+  onSnapshot,
+}: {
+  snapshot?: ConfigSnapshot;
+  onSnapshot: (snapshot: ConfigSnapshot) => void;
+}) {
+  const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [deletingAll, setDeletingAll] = useState(false);
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [reload, setReload] = useState(0);
+  const audio = useRef<HTMLAudioElement | null>(null);
+  const audioUrl = useRef<string | null>(null);
+  const copiedTimer = useRef<number | null>(null);
+
+  const stopPlayback = useCallback(() => {
+    audio.current?.pause();
+    audio.current = null;
+    if (audioUrl.current) {
+      URL.revokeObjectURL(audioUrl.current);
+      audioUrl.current = null;
+    }
+    setPlaying(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+
+    // Typing should not send a query per keystroke.
+    const timer = window.setTimeout(
+      () => {
+        readHistory(query).then(
+          (next) => {
+            if (cancelled) return;
+            setEntries(next);
+            setError(null);
+            setLoading(false);
+          },
+          (reason: unknown) => {
+            if (cancelled) return;
+            setError(String(reason));
+            setLoading(false);
+          },
+        );
+      },
+      query ? 160 : 0,
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [query, reload]);
+
+  useEffect(
+    () => () => {
+      audio.current?.pause();
+      if (audioUrl.current) URL.revokeObjectURL(audioUrl.current);
+      if (copiedTimer.current) window.clearTimeout(copiedTimer.current);
+    },
+    [],
+  );
+
+  async function copy(entry: HistoryEntry) {
+    try {
+      await copyHistory(entry.id);
+      setCopied(entry.id);
+      if (copiedTimer.current) window.clearTimeout(copiedTimer.current);
+      copiedTimer.current = window.setTimeout(() => setCopied(null), 1_600);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function play(entry: HistoryEntry) {
+    if (playing === entry.id) {
+      stopPlayback();
+      return;
+    }
+    stopPlayback();
+    try {
+      const bytes = await readRecording(entry.id);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      const element = new Audio(url);
+      audio.current = element;
+      audioUrl.current = url;
+      element.onended = stopPlayback;
+      element.onerror = () => {
+        stopPlayback();
+        setError("That recording could not be played.");
+      };
+      setPlaying(entry.id);
+      await element.play();
+    } catch (reason) {
+      stopPlayback();
+      setError(String(reason));
+    }
+  }
+
+  async function remove(entry: HistoryEntry) {
+    if (playing === entry.id) stopPlayback();
+    try {
+      await deleteHistory(entry.id);
+      setReload((count) => count + 1);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function removeAll() {
+    if (
+      !window.confirm(
+        "Delete every dictation and its audio? This cannot be undone.",
+      )
+    ) {
+      return;
+    }
+    setDeletingAll(true);
+    stopPlayback();
+    try {
+      await deleteAllHistory();
+      setReload((count) => count + 1);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setDeletingAll(false);
+    }
+  }
+
+  async function retry(entry: HistoryEntry) {
+    try {
+      await retryHistory(entry.id);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function changeRetention(value: string) {
+    setSavingRetention(true);
+    try {
+      const updated = await updateRetention(value === "" ? null : Number(value));
+      onSnapshot(updated);
+      setReload((count) => count + 1);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSavingRetention(false);
+    }
+  }
+
+  const retention =
+    snapshot?.config.retention_days === null ||
+    snapshot?.config.retention_days === undefined
+      ? ""
+      : String(snapshot.config.retention_days);
+
+  return (
+    <section className="section section-wide">
+      <h1 className="section-title">History</h1>
+      <p className="section-deck">
+        Every dictation, with its transcript and its audio, kept on this machine
+        and nowhere else. A failed dictation keeps its recording so Retry can
+        send it again without asking you to speak.
+      </p>
+
+      {error && (
+        <div className="notice" role="alert">
+          <p className="notice-title">History had a problem.</p>
+          <p className="notice-detail">{error}</p>
+        </div>
+      )}
+
+      <div className="history-toolbar">
+        <input
+          type="search"
+          className="text-input history-search"
+          placeholder="Search transcripts, providers, models"
+          aria-label="Search history"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <label className="history-retention">
+          <span className="history-retention-label">Keep</span>
+          <select
+            className="text-input history-select"
+            value={retention}
+            disabled={savingRetention || !snapshot}
+            onChange={(event) => void changeRetention(event.target.value)}
+          >
+            {RETENTION_CHOICES.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="button button-quiet history-delete-all"
+          onClick={() => void removeAll()}
+          disabled={deletingAll || entries.length === 0}
+        >
+          {deletingAll ? "Deleting…" : "Delete all"}
+        </button>
+      </div>
+
+      {loading && entries.length === 0 ? (
+        <p className="quiet history-status">Reading history…</p>
+      ) : entries.length === 0 ? (
+        <div className="empty">
+          <p className="empty-line">
+            {query ? "No dictations match that search." : "Nothing dictated yet."}
+          </p>
+          <p className="empty-note">
+            {query
+              ? "Search looks at the transcript, the cleaned text, the provider and the model."
+              : "Your first dictation will appear here, with the audio to replay."}
+          </p>
+        </div>
+      ) : (
+        <ol className="history-list">
+          {entries.map((entry) => {
+            const text = entry.cleaned.trim() || entry.transcript.trim();
+            return (
+              <li key={entry.id} className="history-item">
+                <div className="history-head">
+                  <time className="history-when" dateTime={new Date(entry.createdAtMs).toISOString()}>
+                    {formatWhen(entry.createdAtMs)}
+                  </time>
+                  <span className="history-facts">
+                    {formatElapsed(entry.durationMs)} ·{" "}
+                    {entry.provider === "groq"
+                      ? "Groq"
+                      : entry.provider === "eleven_labs"
+                        ? "ElevenLabs"
+                        : entry.provider}{" "}
+                    <span className="mono">{entry.model}</span>
+                  </span>
+                </div>
+
+                <p className={text ? "history-text" : "history-text history-text-empty"}>
+                  {text || "No words came back from this recording."}
+                </p>
+
+                {entry.failure && (
+                  <p className="history-failure">
+                    <span className="history-failure-reason">
+                      {entry.failure.reason}
+                    </span>{" "}
+                    <span className="history-failure-detail">
+                      {entry.failure.detail}
+                    </span>
+                  </p>
+                )}
+
+                <div className="history-actions">
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    onClick={() => void play(entry)}
+                    disabled={!entry.recordingPath}
+                  >
+                    {playing === entry.id ? "Stop" : "Play"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    onClick={() => void copy(entry)}
+                    disabled={!text}
+                  >
+                    {copied === entry.id ? "Copied" : "Copy"}
+                  </button>
+                  {entry.failure &&
+                    entry.injection !== "inserted" &&
+                    entry.recordingPath && (
+                    <button
+                      type="button"
+                      className="button button-quiet"
+                      onClick={() => void retry(entry)}
+                    >
+                      Retry
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="button button-quiet history-remove"
+                    onClick={() => void remove(entry)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function formatWhen(milliseconds: number): string {
+  const date = new Date(milliseconds);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return new Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    month: "short",
+    ...(sameYear ? {} : { year: "numeric" }),
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function SpeechSection({
   snapshot,
   access,
@@ -615,6 +936,7 @@ function SpeechSection({
   const [elapsed, setElapsed] = useState(0);
   const [busy, setBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [retryingDictation, setRetryingDictation] = useState(false);
   const since = useRef<number | null>(null);
 
   const hasKey = Boolean(snapshot?.config.providers.groq_key);
@@ -676,6 +998,8 @@ function SpeechSection({
         tapMode: false,
         message: String(error),
         attempt: null,
+        failure: null,
+        retryId: null,
       });
     } finally {
       setBusy(false);
@@ -692,6 +1016,8 @@ function SpeechSection({
         tapMode: false,
         message: String(error),
         attempt: null,
+        failure: null,
+        retryId: null,
       });
     }
   }
@@ -708,9 +1034,30 @@ function SpeechSection({
         tapMode: false,
         message: String(error),
         attempt: null,
+        failure: null,
+        retryId: null,
       });
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function retryLast() {
+    setRetryingDictation(true);
+    try {
+      await retryDictation();
+    } catch (error) {
+      setDictation({
+        phase: "failed",
+        locked: false,
+        tapMode: false,
+        message: String(error),
+        attempt: null,
+        failure: null,
+        retryId: null,
+      });
+    } finally {
+      setRetryingDictation(false);
     }
   }
 
@@ -802,10 +1149,27 @@ function SpeechSection({
         )}
       </p>
 
-      {phase === "failed" && dictation?.message && (
+      {phase === "failed" && (dictation?.failure || dictation?.message) && (
         <div className="notice" role="alert">
-          <p className="notice-title">That dictation did not go through.</p>
-          <p className="notice-detail">{dictation.message}</p>
+          <p className="notice-title">
+            {dictation?.failure?.reason ?? "That dictation did not go through."}
+          </p>
+          <p className="notice-detail">
+            {dictation?.failure?.detail ?? dictation?.message}
+          </p>
+          {dictation?.failure?.cause && (
+            <p className="notice-detail mono">{dictation.failure.cause}</p>
+          )}
+          {dictation?.retryId && (
+            <button
+              className="button button-quiet"
+              type="button"
+              onClick={() => void retryLast()}
+              disabled={retryingDictation}
+            >
+              {retryingDictation ? "Retrying…" : "Retry the recording"}
+            </button>
+          )}
         </div>
       )}
 

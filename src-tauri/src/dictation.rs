@@ -16,6 +16,7 @@ use crate::{
     audio::{self, AudioError, Capture, LevelCallback},
     cleanup::{CleanRequest, Cleaner, GroqCleaner},
     config::{describe, CleanupLevel, Config, ProviderId},
+    failure::{self, Failure},
     transcribe::{Groq, Request, TranscribeError, Transcriber},
 };
 
@@ -41,7 +42,8 @@ pub struct Timings {
 pub struct Attempt {
     pub transcript: String,
     pub cleaned: String,
-    pub cleanup_error: Option<String>,
+    /// Set when cleanup failed and the raw Transcript was inserted instead.
+    pub cleanup_failure: Option<Failure>,
     pub cleanup_model: Option<String>,
     pub provider: String,
     pub model: String,
@@ -161,6 +163,7 @@ impl Dictation {
     }
 
     /// Sends a finished recording to the configured provider, then runs LLM cleanup if enabled.
+    #[cfg(test)]
     pub fn transcribe(config: &Config, captured: &Captured) -> Result<Attempt, DictationError> {
         match GroqCleaner::new() {
             Ok(cleaner) => Self::transcribe_with_cleaner(config, captured, Some(&cleaner)),
@@ -193,11 +196,9 @@ impl Dictation {
                     let model = transcriber.model().to_owned();
                     ("groq", Box::new(transcriber), model)
                 }
-                ProviderId::ElevenLabs => {
-                    return Err(DictationError::Unsupported(
-                        "ElevenLabs is not wired up in this build; Sotto transcribes with Groq for now",
-                    ))
-                }
+                ProviderId::ElevenLabs => return Err(DictationError::Unsupported(
+                    "ElevenLabs is not wired up in this build; Sotto transcribes with Groq for now",
+                )),
             };
 
         let api_key = config
@@ -224,17 +225,13 @@ impl Dictation {
         let marked = uploaded.lock().ok().and_then(|mark| *mark);
         let (upload_ms, provider_ms) = split_round_trip(round_trip, marked, sent);
 
-        let (cleaned, cleanup_error, cleanup_model, cleanup_ms) = run_cleanup(
-            config,
-            &api_key,
-            &transcript.text,
-            cleaner,
-        );
+        let (cleaned, cleanup_failure, cleanup_model, cleanup_ms) =
+            run_cleanup(config, &api_key, &transcript.text, cleaner);
 
         Ok(Attempt {
             transcript: transcript.text,
             cleaned,
-            cleanup_error,
+            cleanup_failure,
             cleanup_model,
             provider: provider.to_owned(),
             model,
@@ -249,7 +246,6 @@ impl Dictation {
             },
         })
     }
-
 }
 
 fn run_cleanup(
@@ -257,7 +253,7 @@ fn run_cleanup(
     api_key: &str,
     transcript: &str,
     cleaner: Option<&dyn Cleaner>,
-) -> (String, Option<String>, Option<String>, u64) {
+) -> (String, Option<Failure>, Option<String>, u64) {
     if config.cleanup.level == CleanupLevel::None || transcript.trim().is_empty() {
         return (transcript.to_owned(), None, None, 0);
     }
@@ -282,7 +278,7 @@ fn run_cleanup(
                 eprintln!("cleanup: {message}");
                 return (
                     transcript.to_owned(),
-                    Some(message),
+                    Some(failure::from_cleanup(err)),
                     Some(model.to_owned()),
                     0,
                 );
@@ -319,7 +315,7 @@ fn run_cleanup(
             eprintln!("cleanup: {message}");
             (
                 transcript.to_owned(),
-                Some(message),
+                Some(failure::from_cleanup(err)),
                 Some(model.to_owned()),
                 millis(started.elapsed()),
             )
@@ -366,8 +362,7 @@ mod tests {
     #[test]
     fn an_unmarked_round_trip_is_not_split_by_guesswork() {
         let start = Instant::now();
-        let (upload_ms, provider_ms) =
-            split_round_trip(Duration::from_millis(300), None, start);
+        let (upload_ms, provider_ms) = split_round_trip(Duration::from_millis(300), None, start);
 
         assert_eq!(upload_ms, 0);
         assert_eq!(provider_ms, 300);
@@ -390,7 +385,9 @@ mod tests {
         let dictation = Dictation::new();
         let config = Config::default();
 
-        let error = dictation.start(&config).expect_err("no key means no recording");
+        let error = dictation
+            .start(&config)
+            .expect_err("no key means no recording");
 
         assert!(matches!(
             error,
@@ -440,7 +437,10 @@ mod tests {
 
         println!("recorded {} ms of audio", attempt.duration_ms);
         println!("timings: {:?}", attempt.timings);
-        println!("wall clock from start to text: {} ms", millis(started.elapsed()));
+        println!(
+            "wall clock from start to text: {} ms",
+            millis(started.elapsed())
+        );
         println!("transcript: {:?}", attempt.transcript);
         if let Ok(json) = serde_json::to_string_pretty(&attempt.timings) {
             let _ = std::fs::write("/tmp/sotto-timing.json", json);
@@ -452,16 +452,17 @@ mod tests {
     #[test]
     fn stopping_without_starting_is_an_error_not_an_empty_transcript() {
         let dictation = Dictation::new();
-        let error = dictation
-            .stop_recording()
-            .expect_err("nothing to stop");
+        let error = dictation.stop_recording().expect_err("nothing to stop");
         assert!(matches!(error, DictationError::NotRecording));
     }
 
     struct StubCleaner(Result<String, crate::cleanup::CleanupError>);
 
     impl Cleaner for StubCleaner {
-        fn clean(&self, _request: &CleanRequest<'_>) -> Result<String, crate::cleanup::CleanupError> {
+        fn clean(
+            &self,
+            _request: &CleanRequest<'_>,
+        ) -> Result<String, crate::cleanup::CleanupError> {
             match &self.0 {
                 Ok(text) => Ok(text.clone()),
                 Err(crate::cleanup::CleanupError::RateLimited) => {
