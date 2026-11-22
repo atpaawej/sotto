@@ -9,6 +9,7 @@ import {
   readAccess,
   readDictationState,
   retryDictation,
+  setPillInputRegion,
   toggleDictation,
   type DictationState,
 } from "./lib/api";
@@ -31,6 +32,7 @@ export default function Pill() {
   const [elapsed, setElapsed] = useState(0);
   const [bars, setBars] = useState<number[]>(() => BAR_WEIGHTS.map(() => 0.16));
   const since = useRef<number | null>(null);
+  const pillRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +95,25 @@ export default function Pill() {
     return () => window.clearInterval(id);
   }, [dictation?.phase]);
 
+  useEffect(() => {
+    const el = pillRef.current;
+    if (!el) return;
+
+    const syncRegion = () => {
+      const rect = el.getBoundingClientRect();
+      void setPillInputRegion(rect.left, rect.top, rect.width, rect.height);
+    };
+
+    syncRegion();
+    const observer = new ResizeObserver(syncRegion);
+    observer.observe(el);
+    window.addEventListener("resize", syncRegion);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", syncRegion);
+    };
+  }, []);
+
   const rawPhase = dictation?.phase ?? "idle";
   const isError = (rawPhase === "failed" || rawPhase === "hint") && !dismissed;
   const phase = dismissed && (rawPhase === "failed" || rawPhase === "hint") ? "idle" : rawPhase;
@@ -115,6 +136,7 @@ export default function Pill() {
   return (
     <MotionConfig reducedMotion="user">
       <motion.div
+        ref={pillRef}
         layout
         transition={SPRING}
         className={[

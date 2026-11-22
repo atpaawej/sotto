@@ -105,6 +105,43 @@ pub fn hide(app: &AppHandle) {
     }
 }
 
+/// Restricts pointer input on the pill window to the given logical CSS
+/// rectangle so transparent padding around `.pill` passes clicks through.
+pub fn set_input_region(app: &AppHandle, x: f64, y: f64, width: f64, height: f64) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(window) = app.get_webview_window("pill") else {
+            return;
+        };
+        let target = window.clone();
+        if let Err(error) = window.run_on_main_thread(move || {
+            use gtk::prelude::WidgetExt;
+            let Ok(gtk_win) = target.gtk_window() else {
+                return;
+            };
+            let w = width.ceil().max(0.0) as i32;
+            let h = height.ceil().max(0.0) as i32;
+            if w <= 0 || h <= 0 {
+                let empty = gtk::cairo::Region::create();
+                gtk_win.input_shape_combine_region(Some(&empty));
+                return;
+            }
+            let rect = gtk::cairo::RectangleInt::new(
+                x.floor().max(0.0) as i32,
+                y.floor().max(0.0) as i32,
+                w,
+                h,
+            );
+            let region = gtk::cairo::Region::create_rectangle(&rect);
+            gtk_win.input_shape_combine_region(Some(&region));
+        }) {
+            crate::devlog::step("pill", format!("could not update input region: {error}"));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (app, x, y, width, height);
+}
+
 pub struct PillSurface {
     app: AppHandle,
     /// Which reset timer is still the current one. A newer state cancels the

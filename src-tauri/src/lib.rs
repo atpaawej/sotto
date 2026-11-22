@@ -200,6 +200,11 @@ fn hide_pill_window(state: State<'_, AppState>, app: AppHandle) {
 }
 
 #[tauri::command]
+fn set_pill_input_region(app: AppHandle, x: f64, y: f64, width: f64, height: f64) {
+    pill::set_input_region(&app, x, y, width, height);
+}
+
+#[tauri::command]
 fn update_dictionary(
     state: State<'_, AppState>,
     dictionary: Vec<String>,
@@ -494,6 +499,7 @@ pub fn run() {
             update_pill_visibility,
             pill_visibility,
             hide_pill_window,
+            set_pill_input_region,
             update_dictionary,
             update_provider,
             update_provider_key,

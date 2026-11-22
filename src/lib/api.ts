@@ -64,6 +64,15 @@ export function hidePillWindow(): Promise<void> {
   return invoke<void>("hide_pill_window");
 }
 
+export function setPillInputRegion(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke<void>("set_pill_input_region", { x, y, width, height });
+}
+
 export function updateDictionary(dictionary: string[]): Promise<ConfigSnapshot> {
   return invoke<ConfigSnapshot>("update_dictionary", { dictionary });
 }
