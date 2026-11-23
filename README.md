@@ -2,6 +2,12 @@
 
 Hold a key, speak, and clean text lands where your cursor is. Open-source desktop dictation for Linux, powered by your own Groq or ElevenLabs API key.
 
+## Demo
+
+<video src="https://raw.githubusercontent.com/atpaawej/typeless/master/site/assets/sotto-demo.mp4" controls width="100%"></video>
+
+*(Also available as [WebM](./site/assets/sotto-demo.webm) · [MP4](./site/assets/sotto-demo.mp4))*
+
 ## Install on Ubuntu / Debian
 
 Run one command to install or update Sotto:
