@@ -162,7 +162,24 @@ body {
 
 /* Hero */
 .hero {
-  padding-block: 64px 72px;
+  padding-block: 56px 72px;
+}
+
+.ph-badge {
+  display: inline-block;
+  margin-bottom: 24px;
+  border-radius: 10px;
+  transition: transform 150ms var(--ease-out);
+}
+
+.ph-badge:active {
+  transform: scale(0.97);
+}
+
+.ph-badge img {
+  display: block;
+  width: 250px;
+  height: 54px;
 }
 
 .hero-title {
