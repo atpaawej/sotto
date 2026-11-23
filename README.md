@@ -2,15 +2,21 @@
 
 Hold a key, speak, and clean text lands where your cursor is. Open-source desktop dictation for Linux, powered by your own Groq or ElevenLabs API key.
 
+## Demo
+
+<video src="https://raw.githubusercontent.com/atpaawej/sotto/master/site/assets/sotto-demo.mp4" controls width="100%"></video>
+
+*(Also available as [WebM](./site/assets/sotto-demo.webm) · [MP4](./site/assets/sotto-demo.mp4))*
+
 ## Install on Ubuntu / Debian
 
 Run one command to install or update Sotto:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/atpaawej/typeless/master/scripts/install-sotto.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/atpaawej/sotto/master/scripts/install-sotto.sh | sudo bash
 ```
 
-The installer downloads the latest `.deb` from [GitHub Releases](https://github.com/atpaawej/typeless/releases/latest), verifies its SHA-256 checksum against the `.sha256` file published beside it, and installs `sotto`, the `.desktop` entry, and the app icon with `dpkg`. You can also download the `.deb` or `.AppImage` manually from the releases page.
+The installer downloads the latest `.deb` from [GitHub Releases](https://github.com/atpaawej/sotto/releases/latest), verifies its SHA-256 checksum against the `.sha256` file published beside it, and installs `sotto`, the `.desktop` entry, and the app icon with `dpkg`. You can also download the `.deb` or `.AppImage` manually from the releases page.
 
 ## Why Sotto
 

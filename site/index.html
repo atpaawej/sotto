@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#171815" />
+
+    <title>Sotto — Open-Source Voice Dictation for Linux (Wayland &amp; X11)</title>
+    <meta
+      name="description"
+      content="Hold a key, speak, and clean text lands at your Linux cursor in ~800 ms. Open-source desktop dictation for Wayland and X11, powered by your own Groq or ElevenLabs API key."
+    />
+    <meta
+      name="keywords"
+      content="Linux voice dictation, Wayland dictation, speech to text Linux, X11 dictation, Whisper Linux, Groq Whisper, open source dictation, Sotto"
+    />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://sotto.aawej.in/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Sotto" />
+    <meta property="og:url" content="https://sotto.aawej.in/" />
+    <meta property="og:title" content="Sotto — Open-Source Voice Dictation for Linux" />
+    <meta
+      property="og:description"
+      content="Hold a key, speak, and clean text lands at your Linux cursor in ~800 ms. Built for Wayland and X11 with your own Groq or ElevenLabs key."
+    />
+    <meta property="og:image" content="https://sotto.aawej.in/assets/og-image.png" />
+    <meta
+      property="og:image:secure_url"
+      content="https://sotto.aawej.in/assets/og-image.png"
+    />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Sotto — Hold a key. Speak. Clean text lands at your Linux cursor."
+    />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Sotto — Open-Source Voice Dictation for Linux" />
+    <meta
+      name="twitter:description"
+      content="Hold a key, speak, and clean text lands at your Linux cursor in ~800 ms. Built for Wayland and X11."
+    />
+    <meta name="twitter:image" content="https://sotto.aawej.in/assets/og-image.png" />
+    <meta
+      name="twitter:image:alt"
+      content="Sotto — Hold a key. Speak. Clean text lands at your Linux cursor."
+    />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/svg+xml" href="./assets/logo.svg" />
+    <link rel="icon" type="image/png" href="./assets/logo.png" />
+
+    <!-- LCP Poster Preload -->
+    <link rel="preload" as="image" href="./assets/sotto-poster.webp" fetchpriority="high" />
+
+    <!-- Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap"
+    />
+
+    <link rel="stylesheet" href="./styles.css" />
+
+    <!-- Structured Data: SoftwareApplication + FAQPage -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "SoftwareApplication",
+            "name": "Sotto",
+            "image": "https://sotto.aawej.in/assets/og-image.png",
+            "description": "Open-source desktop voice dictation for Linux. Hold a shortcut key, speak, and clean text lands at your cursor on Wayland and X11.",
+            "url": "https://sotto.aawej.in/",
+            "downloadUrl": "https://github.com/atpaawej/sotto/releases/latest",
+            "softwareVersion": "0.2.1",
+            "operatingSystem": "Linux (Ubuntu, Debian, Wayland, X11)",
+            "applicationCategory": "UtilitiesApplication",
+            "license": "https://opensource.org/licenses/MIT",
+            "isAccessibleForFree": true,
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            }
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Does Sotto work on Wayland?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. Sotto uses wl-clipboard (wl-copy) plus Ctrl+V with best-effort clipboard restoration, and includes ydotool as an optional fallback."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How much does it cost to run?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Sotto itself is free and MIT licensed. You bring your own API key for Groq Whisper large-v3-turbo (which includes a generous free tier) or ElevenLabs Scribe."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Where are my API keys and recordings stored?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "API keys stay on disk in ~/.config/sotto/config.json with 0600 permissions. Audio is sent only to your active provider, and recordings stay locally so you can retry failed requests."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which Linux distributions are supported?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Ubuntu and Debian have a one-line installer and .deb packages. Other Linux distributions can use the .AppImage from GitHub Releases."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link visually-hidden" href="#main-content">Skip to main content</a>
+
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="./" aria-label="Sotto home">
+          <img src="./assets/logo.svg" alt="" width="24" height="24" />
+          <span class="brand-name">Sotto</span>
+        </a>
+        <nav aria-label="Primary">
+          <ul class="nav-list">
+            <li><a href="#how-it-works">How it works</a></li>
+            <li><a href="#install">Install</a></li>
+            <li><a href="#faq">FAQ</a></li>
+            <li>
+              <a
+                href="https://github.com/atpaawej/sotto"
+                target="_blank"
+                rel="noopener noreferrer"
+                >GitHub</a
+              >
+            </li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <section class="hero container">
+        <h1 class="hero-title">Hold a key. Speak. Clean text lands at your Linux cursor.</h1>
+        <p class="hero-subhead">
+          Sotto transcribes your voice with Groq Whisper in about 600–800 ms, strips out stutters
+          and self-corrections, and pastes straight into your terminal, editor, or browser on
+          Wayland and X11 for $0 on Groq’s free tier.
+        </p>
+
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#install">Install on Ubuntu / Debian</a>
+          <a
+            class="btn btn-secondary"
+            href="https://github.com/atpaawej/sotto/releases/latest"
+            target="_blank"
+            rel="noopener noreferrer"
+            >Download .deb / .AppImage</a
+          >
+          <a
+            class="text-link"
+            href="https://github.com/atpaawej/sotto"
+            target="_blank"
+            rel="noopener noreferrer"
+            >View source (MIT)</a
+          >
+        </div>
+
+        <figure class="demo-frame">
+          <div class="demo-chrome" aria-hidden="true">
+            <span class="live-indicator">
+              <span class="live-dot"></span>
+              <span class="live-label">Sotto demo · Wayland &amp; X11</span>
+            </span>
+            <span class="demo-meta">1752 × 1080 · 0:18</span>
+          </div>
+          <video
+            class="demo-video"
+            controls
+            playsinline
+            preload="metadata"
+            poster="./assets/sotto-poster.webp"
+            width="1752"
+            height="1080"
+          >
+            <source src="./assets/sotto-demo.webm" type="video/webm" />
+            <source src="./assets/sotto-demo.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+            <a href="./assets/sotto-demo.mp4">Download the demo video (MP4)</a>.
+          </video>
+          <figcaption class="demo-caption">
+            <span>Hold your shortcut in any focused window, speak naturally, and release.</span>
+            <details class="demo-transcript">
+              <summary>Read what happens in the demo</summary>
+              <p>
+                The user keeps focus inside their active Linux window, holds the configured
+                dictation shortcut so the Sotto pill enters its live recording state, speaks a full
+                thought with natural pauses, and releases the key. Within roughly 800 ms, Sotto
+                transcribes the audio, cleans up filler words, and injects the finished text at
+                the cursor.
+              </p>
+            </details>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="section container rule-top" aria-labelledby="problem-heading">
+        <div class="split-grid">
+          <h2 id="problem-heading" class="section-heading">
+            Linux dictation usually breaks on Wayland or locks you into a slow local model.
+          </h2>
+          <div class="prose">
+            <p>
+              You end up back on the keyboard for long prompts, Slack messages, and code comments.
+              Sotto stays out of your way until you hold your shortcut key, sends audio only to
+              your own Groq or ElevenLabs key, and puts finished text where you are typing.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section container rule-top" aria-labelledby="proof-heading">
+        <div class="proof-header">
+          <h2 id="proof-heading" class="section-heading">
+            193 dictations, 100% inserted, $0 spent.
+          </h2>
+          <p class="proof-sub">
+            Three days of everyday writing on Groq’s free tier: 4,047 words spoken in 36m 26s at
+            111 WPM, saving over an hour compared to 40 WPM typing.
+          </p>
+        </div>
+
+        <dl class="stats-strip">
+          <div class="stat-cell">
+            <dt>Inserted</dt>
+            <dd>100% <span>(193 / 193)</span></dd>
+          </div>
+          <div class="stat-cell">
+            <dt>Groq avg latency</dt>
+            <dd>614 ms</dd>
+          </div>
+          <div class="stat-cell">
+            <dt>Average pace</dt>
+            <dd>111 WPM</dd>
+          </div>
+          <div class="stat-cell">
+            <dt>API bill</dt>
+            <dd>$0 <span>(Groq free tier)</span></dd>
+          </div>
+        </dl>
+
+        <figure class="insights-frame">
+          <img
+            src="./assets/sotto-insights.webp"
+            alt="Sotto Insights screen showing 4,047 words dictated across 193 dictations at 111 WPM, 1h 4m saved, 100% inserted, and 614 ms average latency on Groq."
+            width="1600"
+            height="868"
+            loading="lazy"
+          />
+          <figcaption>
+            Sotto v0.2.1 Insights: 298 filler words trimmed by Cleanup, 1h 4m saved in three days.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="how-it-works" class="section container rule-top" aria-labelledby="steps-heading">
+        <h2 id="steps-heading" class="section-heading">Four-step setup, then one shortcut.</h2>
+        <ol class="steps-grid">
+          <li class="step-item">
+            <span class="step-num" aria-hidden="true">01</span>
+            <h3 class="step-title">Hold your key in any app</h3>
+            <p class="step-body">
+              Stay in your terminal, editor, or browser. Double-tap the shortcut when you want
+              hands-free lock mode.
+            </p>
+          </li>
+          <li class="step-item">
+            <span class="step-num" aria-hidden="true">02</span>
+            <h3 class="step-title">Talk naturally</h3>
+            <p class="step-body">
+              Groq Whisper <code>large-v3-turbo</code> transcribes in about 800 ms, and cleanup
+              strips filler words and mid-sentence restarts while keeping your phrasing.
+            </p>
+          </li>
+          <li class="step-item">
+            <span class="step-num" aria-hidden="true">03</span>
+            <h3 class="step-title">Release to paste</h3>
+            <p class="step-body">
+              Sotto injects the finished text via <code>wl-clipboard</code> and
+              <code>Ctrl+V</code> (with <code>ydotool</code> as an optional fallback) and restores
+              your previous clipboard.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="section container rule-top" aria-labelledby="trust-heading">
+        <h2 id="trust-heading" class="section-heading">Built like a quiet instrument.</h2>
+        <dl class="spec-list">
+          <div class="spec-row">
+            <dt>Your API key stays on disk</dt>
+            <dd>
+              Stored in <code>~/.config/sotto/config.json</code> with <code>0600</code>
+              permissions. Audio goes only to Groq or ElevenLabs, and Groq’s free tier covers
+              everyday dictation.
+            </dd>
+          </div>
+          <div class="spec-row">
+            <dt>Failures are never silent</dt>
+            <dd>
+              If a microphone is missing, a key fails, or the network drops, the pill tells you
+              immediately and Settings keeps the full cause. Every recording stays on disk so you
+              can retry with one click.
+            </dd>
+          </div>
+          <div class="spec-row">
+            <dt>Custom words land right</dt>
+            <dd>
+              Add project names, acronyms, and preferred spellings to your Dictionary so you do
+              not have to fix them after.
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section id="install" class="section container rule-top" aria-labelledby="install-heading">
+        <div class="install-box">
+          <div class="install-copy">
+            <h2 id="install-heading" class="section-heading">
+              Install in one command on Ubuntu or Debian.
+            </h2>
+            <p class="install-note">
+              Downloads the latest <code>.deb</code> from GitHub Releases, verifies its SHA-256
+              checksum against the published <code>.sha256</code> file, and installs
+              <code>sotto</code> with <code>dpkg</code>.
+            </p>
+          </div>
+
+          <div class="command-bar">
+            <pre><code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/atpaawej/sotto/master/scripts/install-sotto.sh | sudo bash</code></pre>
+            <button
+              type="button"
+              class="btn-copy"
+              id="copy-btn"
+              aria-label="Copy install command"
+            >
+              Copy
+            </button>
+          </div>
+          <p class="copy-status visually-hidden" id="copy-status" aria-live="polite"></p>
+
+          <div class="install-links">
+            <a
+              href="https://github.com/atpaawej/sotto/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Download .deb or .AppImage</a
+            >
+            <span aria-hidden="true">·</span>
+            <a
+              href="https://github.com/atpaawej/sotto/blob/master/scripts/install-sotto.sh"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Inspect install-sotto.sh</a
+            >
+          </div>
+        </div>
+
+        <div class="maker-ask">
+          <p>
+            Built by a 17-year-old who got tired of Linux voice typing breaking on Wayland. Sotto
+            is free, MIT licensed, and runs for $0 on Groq’s free tier. If it saves you time, a
+            star on GitHub helps more Linux users find it.
+          </p>
+          <a
+            class="btn btn-secondary"
+            href="https://github.com/atpaawej/sotto"
+            target="_blank"
+            rel="noopener noreferrer"
+            >Star Sotto on GitHub</a
+          >
+        </div>
+      </section>
+
+      <section id="faq" class="section container rule-top" aria-labelledby="faq-heading">
+        <h2 id="faq-heading" class="section-heading">Questions</h2>
+        <div class="faq-list">
+          <details class="faq-item">
+            <summary>Does Sotto work on Wayland?</summary>
+            <p>
+              Yes. Text injection leads with <code>wl-clipboard</code> (<code>wl-copy</code>) plus
+              <code>Ctrl+V</code> while restoring your previous clipboard on a best-effort basis,
+              and includes <code>ydotool</code> as an optional fallback.
+            </p>
+          </details>
+          <details class="faq-item">
+            <summary>How much does it cost to run?</summary>
+            <p>
+              Sotto is free and MIT licensed. You bring your own API key for Groq Whisper
+              <code>large-v3-turbo</code> (which includes a generous free tier) or ElevenLabs
+              Scribe.
+            </p>
+          </details>
+          <details class="faq-item">
+            <summary>What happens on first launch?</summary>
+            <p>
+              A four-step setup walks you through picking Groq or ElevenLabs, verifying your API
+              key with a live test request, choosing your hold-to-dictate shortcut, and dictating
+              one sentence into any app.
+            </p>
+          </details>
+          <details class="faq-item">
+            <summary>What if I am not on Ubuntu or Debian?</summary>
+            <p>
+              Grab the <code>.AppImage</code> directly from
+              <a
+                href="https://github.com/atpaawej/sotto/releases/latest"
+                target="_blank"
+                rel="noopener noreferrer"
+                >GitHub Releases</a
+              >, or build from source with Cargo and Node.
+            </p>
+          </details>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer container rule-top">
+      <div class="footer-inner">
+        <p class="footer-brand">
+          <strong>Sotto</strong> · MIT License · Open-source Linux dictation
+        </p>
+        <ul class="footer-links">
+          <li>
+            <a
+              href="https://github.com/atpaawej/sotto"
+              target="_blank"
+              rel="noopener noreferrer"
+              >GitHub</a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/atpaawej/sotto/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Releases</a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/atpaawej/sotto/issues"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Issues</a
+            >
+          </li>
+        </ul>
+      </div>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
